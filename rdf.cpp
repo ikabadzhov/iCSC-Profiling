@@ -156,8 +156,6 @@ ROOT::RVec<std::size_t> direct_find_trijet(Vec<XYZTVector> jets) {
 // TODO: find a proxy function which is distributive
 // Disclaimer: Might be impossible!
 // a two-pointer approach, O(n^2) time and O(n) space
-// need to understand if we are allowed to reorder to original vector
-// if so, can solve the problem in O(1) space
 // https://leetcode.com/problems/3sum-closest/
 ROOT::RVec<std::size_t> nsquare_find_trijet(Vec<XYZTVector> jets) {
   float distance = 1e9;
