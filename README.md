@@ -138,7 +138,7 @@ perf stat -M Backend_Bound,Bad_Speculation,Retiring time
 #### Perf record
 
 ```
-perf record -o original.data -F 99 --call-graph=dwarf ./rdf original input/ 30
+perf record -o original.data -F 99 --call-graph=fp -g ./rdf original input/ 30
 ```
 
 One very useful approach is to see which event was reported as a bottleneck by perf stat, and then to record the events that are related to that bottleneck. You can specify this event with the `-e` option of perf record.
@@ -170,7 +170,7 @@ You can produce a flamegraph with the following command:
 
 ```
 mkdir graphs
-perf script -i original.data | ./stackcollapse-perf.pl | ./flamegraph.pl -w 1500 --colors java > graphs/original.svg
+perf script -i original.data | ./stackcollapse-perf.pl | ./flamegraph.pl -w 1500 --colors java --bgcolors=#FFFFFF > graphs/original.svg
 ```
 
 This should already give you a good idea of what is going on.
