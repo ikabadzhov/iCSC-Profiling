@@ -126,16 +126,15 @@ ROOT::RVec<std::size_t> transposed_find_trijet(Vec<XYZTVector> jets) {
 // make use of the fact that we know the size of the combinations
 // no need to create extra 2d vector
 ROOT::RVec<std::size_t> direct_find_trijet(Vec<XYZTVector> jets) {
-  constexpr std::size_t n = 3;
   float distance = 1e9;
   const auto top_mass = 172.5;
   std::size_t idx1 = 0, idx2 = 1, idx3 = 2;
-
-  for (std::size_t i = 0; i <= jets.size() - n; i++) {
+  const auto n_jets = jets.size();
+  for (std::size_t i = 0; i < n_jets - 2; i++) {
     auto p1 = jets[i];
-    for (std::size_t j = i + 1; j <= jets.size() - n + 1; j++) {
+    for (std::size_t j = i + 1; j < n_jets - 1; j++) {
       auto p2 = jets[j];
-      for (std::size_t k = j + 1; k <= jets.size() - n + 2; k++) {
+      for (std::size_t k = j + 1; k < n_jets; k++) {
         auto p3 = jets[k];
         const auto tmp_mass = (p1 + p2 + p3).mass();
         const auto tmp_distance = std::abs(tmp_mass - top_mass);
@@ -148,7 +147,6 @@ ROOT::RVec<std::size_t> direct_find_trijet(Vec<XYZTVector> jets) {
       }
     }
   }
-
   return {idx1, idx2, idx3};
 }
 
