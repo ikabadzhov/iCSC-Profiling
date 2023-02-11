@@ -208,6 +208,19 @@ perf script -i direct.data | ./stackcollapse-perf.pl > out.folded2
 ./difffolded.pl out.folded1 out.folded2 | ./flamegraph.pl -w 1500 > graphs/diff.svg
 ```
 
+## Further discussion (not on the slides)
+
+Vannilla perf is a very poweful tool, but not centered around C++. Guilherme Amadio (@amadio) has patched perf for better stack unwinding, precisely for C++. See https://github.com/amadio/g4run/tree/master/perf.
+
+For the purpose of completeness, attached are the flamegraphs from vanilla and patched perf. To reporduce them, it suffices to get the geant4 version of flamegraph.pl and stackcollapse.pl, and to run the script. In particular that would be:
+```
+wget https://raw.githubusercontent.com/amadio/g4run/master/perf/scripts/flamegraph.pl -O g4_flamegraph.pl
+wget https://raw.githubusercontent.com/amadio/g4run/master/perf/scripts/stackcollapse.pl -O g4_stackcollapse.pl
+chmod +x g4_flamegraph.pl g4_stackcollapse.pl
+```
+
+The workflow of this final experiment is at vanilla_vs_patched.sh. And the results are at Vanilla_vs_G4_GRAPHS/.
+
 ## Sources:
 
 * [Perf man page](https://man7.org/linux/man-pages/man1/perf.1.html)

@@ -1,0 +1,2853 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1500" height="886" onload="init(evt)" viewBox="0 0 1500 886" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#FFFFFF" offset="5%" />
+		<stop stop-color="#FFFFFF" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1500.0" height="886.0" fill="url(#background)"  />
+<text id="title" x="750.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="869" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1390.00" y="24" >Search</text>
+<text id="ignorecase" x="1474.00" y="24" >ic</text>
+<text id="matched" x="1390.00" y="869" > </text>
+<g id="frames">
+<g >
+<title>asm_exc_page_fault (860,699,281 samples, 0.64%)</title><rect x="512.2" y="421" width="9.5" height="15.0" fill="rgb(227,90,90)" rx="2" ry="2" />
+<text  x="515.23" y="431.5" ></text>
+</g>
+<g >
+<title>folio_add_lru (45,328,307 samples, 0.03%)</title><rect x="520.7" y="341" width="0.5" height="15.0" fill="rgb(229,92,92)" rx="2" ry="2" />
+<text  x="523.73" y="351.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="341" width="0.5" height="15.0" fill="rgb(205,58,58)" rx="2" ry="2" />
+<text  x="1457.81" y="351.5" ></text>
+</g>
+<g >
+<title>adler32_z (271,780,572 samples, 0.20%)</title><rect x="1263.3" y="501" width="3.0" height="15.0" fill="rgb(248,120,120)" rx="2" ry="2" />
+<text  x="1266.28" y="511.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (84,398,257 samples, 0.06%)</title><rect x="11.8" y="725" width="0.9" height="15.0" fill="rgb(233,98,98)" rx="2" ry="2" />
+<text  x="14.80" y="735.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (84,245,949 samples, 0.06%)</title><rect x="11.8" y="613" width="0.9" height="15.0" fill="rgb(253,127,127)" rx="2" ry="2" />
+<text  x="14.80" y="623.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to clang::ASTReader::FinishedDeserializing (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="277" width="0.5" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="1488.25" y="287.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RTreeColumnReader&lt;ROOT::VecOps::RVec&lt;float&gt; &gt;::GetImpl (45,720,257,394 samples, 34.09%)</title><rect x="91.7" y="549" width="504.5" height="15.0" fill="rgb(213,213,64)" rx="2" ry="2" />
+<text  x="94.68" y="559.5" >ROOT::Internal::RDF::RTreeColumnReader&lt;ROOT::VecOps::RVec&lt;float&gt; &gt;::G..</text>
+</g>
+<g >
+<title>TPad::Print (226,345,522 samples, 0.17%)</title><rect x="1484.8" y="709" width="2.5" height="15.0" fill="rgb(216,216,64)" rx="2" ry="2" />
+<text  x="1487.76" y="719.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (1,177,092,896 samples, 0.88%)</title><rect x="526.2" y="421" width="13.0" height="15.0" fill="rgb(243,113,113)" rx="2" ry="2" />
+<text  x="529.23" y="431.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (45,296,732 samples, 0.03%)</title><rect x="1410.3" y="517" width="0.5" height="15.0" fill="rgb(225,87,87)" rx="2" ry="2" />
+<text  x="1413.27" y="527.5" ></text>
+</g>
+<g >
+<title>llvm::RuntimeDyld::finalizeWithMemoryManagerLocking (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="325" width="0.5" height="15.0" fill="rgb(187,187,54)" rx="2" ry="2" />
+<text  x="1489.75" y="335.5" ></text>
+</g>
+<g >
+<title>clang::ASTContext::getASTRecordLayout (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="453" width="0.5" height="15.0" fill="rgb(186,186,54)" rx="2" ry="2" />
+<text  x="1488.25" y="463.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="325" width="0.5" height="15.0" fill="rgb(238,106,106)" rx="2" ry="2" />
+<text  x="1457.81" y="335.5" ></text>
+</g>
+<g >
+<title>malloc (45,333,633 samples, 0.03%)</title><rect x="539.2" y="405" width="0.5" height="15.0" fill="rgb(237,104,104)" rx="2" ry="2" />
+<text  x="542.22" y="415.5" ></text>
+</g>
+<g >
+<title>TChain::LoadTree (1,358,169,498 samples, 1.01%)</title><rect x="1443.8" y="677" width="15.0" height="15.0" fill="rgb(205,205,60)" rx="2" ry="2" />
+<text  x="1446.82" y="687.5" ></text>
+</g>
+<g >
+<title>TDirectoryFile::Close (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="613" width="4.0" height="15.0" fill="rgb(198,198,58)" rx="2" ry="2" />
+<text  x="1454.32" y="623.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RDefineReader::GetImpl (118,352,939,081 samples, 88.24%)</title><rect x="47.7" y="661" width="1306.0" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="50.71" y="671.5" >ROOT::Internal::RDF::RDefineReader::GetImpl</text>
+</g>
+<g >
+<title>cling::utils::platform::DLOpen (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="501" width="0.5" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="1487.76" y="511.5" ></text>
+</g>
+<g >
+<title>ROOT::VecOps::Construct&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PxPyPzE4D&lt;double&gt; &gt;, ROOT::Math::LorentzVector&lt;ROOT::Math::PtEtaPhiM4D&lt;double&gt; &gt; &gt; (90,616,719 samples, 0.07%)</title><rect x="836.2" y="565" width="1.0" height="15.0" fill="rgb(179,179,51)" rx="2" ry="2" />
+<text  x="839.16" y="575.5" ></text>
+</g>
+<g >
+<title>TChain::LoadTree (45,287,669 samples, 0.03%)</title><rect x="1434.8" y="693" width="0.5" height="15.0" fill="rgb(219,219,66)" rx="2" ry="2" />
+<text  x="1437.83" y="703.5" ></text>
+</g>
+<g >
+<title>TDataMember::TDataMember (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="501" width="0.5" height="15.0" fill="rgb(199,199,59)" rx="2" ry="2" />
+<text  x="1488.75" y="511.5" ></text>
+</g>
+<g >
+<title>ROOT::TGenericClassInfo::CreateRuleSet (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="597" width="0.5" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="1488.75" y="607.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitScalarExpr (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="181" width="0.5" height="15.0" fill="rgb(196,196,57)" rx="2" ry="2" />
+<text  x="1489.25" y="191.5" ></text>
+</g>
+<g >
+<title>free_unref_page_list (90,577,772 samples, 0.07%)</title><rect x="1453.8" y="229" width="1.0" height="15.0" fill="rgb(217,75,75)" rx="2" ry="2" />
+<text  x="1456.81" y="239.5" ></text>
+</g>
+<g >
+<title>get_mem_cgroup_from_mm (45,325,267 samples, 0.03%)</title><rect x="524.7" y="341" width="0.5" height="15.0" fill="rgb(203,54,54)" rx="2" ry="2" />
+<text  x="527.73" y="351.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::ProxyReadTemplate&lt;&amp;ROOT::Detail::TBranchProxy::ReadNoParentNoBranchCountNoCollection&gt; (5,123,881,799 samples, 3.82%)</title><rect x="1358.7" y="629" width="56.6" height="15.0" fill="rgb(216,216,64)" rx="2" ry="2" />
+<text  x="1361.73" y="639.5" >ROOT:..</text>
+</g>
+<g >
+<title>new_sync_read (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="389" width="15.5" height="15.0" fill="rgb(210,64,64)" rx="2" ry="2" />
+<text  x="1396.78" y="399.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::TBranchProxy::Read (9,283,468,755 samples, 6.92%)</title><rect x="1244.3" y="613" width="102.4" height="15.0" fill="rgb(208,208,62)" rx="2" ry="2" />
+<text  x="1247.29" y="623.5" >ROOT::Detail..</text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (45,287,405 samples, 0.03%)</title><rect x="611.2" y="533" width="0.5" height="15.0" fill="rgb(210,64,64)" rx="2" ry="2" />
+<text  x="614.20" y="543.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (61,804,087 samples, 0.05%)</title><rect x="10.0" y="725" width="0.7" height="15.0" fill="rgb(254,129,129)" rx="2" ry="2" />
+<text  x="13.00" y="735.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::VecOps::SmallVectorTemplateBase&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PtEtaPhiM4D&lt;double&gt; &gt;, false&gt;::grow (226,558,003 samples, 0.17%)</title><rect x="608.7" y="533" width="2.5" height="15.0" fill="rgb(228,228,69)" rx="2" ry="2" />
+<text  x="611.70" y="543.5" ></text>
+</g>
+<g >
+<title>R__unzip (90,592,320 samples, 0.07%)</title><rect x="1450.3" y="629" width="1.0" height="15.0" fill="rgb(220,79,79)" rx="2" ry="2" />
+<text  x="1453.32" y="639.5" ></text>
+</g>
+<g >
+<title>TAxis::FindBin (226,157,808 samples, 0.17%)</title><rect x="1427.8" y="661" width="2.5" height="15.0" fill="rgb(211,211,63)" rx="2" ry="2" />
+<text  x="1430.83" y="671.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (181,099,960 samples, 0.14%)</title><rect x="537.2" y="389" width="2.0" height="15.0" fill="rgb(203,55,55)" rx="2" ry="2" />
+<text  x="540.22" y="399.5" ></text>
+</g>
+<g >
+<title>__sinh (10,326,570,795 samples, 7.70%)</title><rect x="706.2" y="533" width="114.0" height="15.0" fill="rgb(237,104,104)" rx="2" ry="2" />
+<text  x="709.21" y="543.5" >__sinh</text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RDefineReader::GetImpl (271,646,139 samples, 0.20%)</title><rect x="1418.3" y="677" width="3.0" height="15.0" fill="rgb(213,213,64)" rx="2" ry="2" />
+<text  x="1421.27" y="687.5" ></text>
+</g>
+<g >
+<title>TFile::~TFile (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="661" width="4.0" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="1454.32" y="671.5" ></text>
+</g>
+<g >
+<title>__mod_node_page_state (45,225,288 samples, 0.03%)</title><rect x="541.7" y="293" width="0.5" height="15.0" fill="rgb(234,99,99)" rx="2" ry="2" />
+<text  x="544.72" y="303.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (45,283,405 samples, 0.03%)</title><rect x="1336.7" y="437" width="0.5" height="15.0" fill="rgb(235,102,102)" rx="2" ry="2" />
+<text  x="1339.74" y="447.5" ></text>
+</g>
+<g >
+<title>__sinh (135,935,153 samples, 0.10%)</title><rect x="1221.8" y="613" width="1.5" height="15.0" fill="rgb(200,51,51)" rx="2" ry="2" />
+<text  x="1224.79" y="623.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::VecOps::SmallVectorTemplateBase&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PxPyPzE4D&lt;double&gt; &gt;, false&gt;::grow (45,300,914 samples, 0.03%)</title><rect x="637.2" y="533" width="0.5" height="15.0" fill="rgb(183,183,53)" rx="2" ry="2" />
+<text  x="640.24" y="543.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="805" width="1.0" height="15.0" fill="rgb(240,108,108)" rx="2" ry="2" />
+<text  x="1490.28" y="815.5" ></text>
+</g>
+<g >
+<title>TAxis::FindBin (135,707,033 samples, 0.10%)</title><rect x="1422.3" y="677" width="1.5" height="15.0" fill="rgb(202,202,60)" rx="2" ry="2" />
+<text  x="1425.34" y="687.5" ></text>
+</g>
+<g >
+<title>TTree::CreateBasket (135,874,150 samples, 0.10%)</title><rect x="540.7" y="453" width="1.5" height="15.0" fill="rgb(219,219,66)" rx="2" ry="2" />
+<text  x="543.72" y="463.5" ></text>
+</g>
+<g >
+<title>TCling::ProcessLine (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="581" width="0.5" height="15.0" fill="rgb(198,198,58)" rx="2" ry="2" />
+<text  x="1489.75" y="591.5" ></text>
+</g>
+<g >
+<title>__do_munmap (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="293" width="0.5" height="15.0" fill="rgb(242,111,111)" rx="2" ry="2" />
+<text  x="1457.81" y="303.5" ></text>
+</g>
+<g >
+<title>page_remove_rmap (45,284,096 samples, 0.03%)</title><rect x="1452.3" y="261" width="0.5" height="15.0" fill="rgb(249,122,122)" rx="2" ry="2" />
+<text  x="1455.32" y="271.5" ></text>
+</g>
+<g >
+<title>clang::ASTContext::getASTRecordLayout (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="437" width="0.5" height="15.0" fill="rgb(223,223,67)" rx="2" ry="2" />
+<text  x="1488.25" y="447.5" ></text>
+</g>
+<g >
+<title>llvm::orc::JITSymbolResolverAdapter::lookup (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="277" width="0.5" height="15.0" fill="rgb(217,217,65)" rx="2" ry="2" />
+<text  x="1489.75" y="287.5" ></text>
+</g>
+<g >
+<title>__memset_evex_unaligned_erms (135,874,150 samples, 0.10%)</title><rect x="540.7" y="437" width="1.5" height="15.0" fill="rgb(223,84,84)" rx="2" ry="2" />
+<text  x="543.72" y="447.5" ></text>
+</g>
+<g >
+<title>TBranch::~TBranch (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="517" width="4.0" height="15.0" fill="rgb(204,204,60)" rx="2" ry="2" />
+<text  x="1454.32" y="527.5" ></text>
+</g>
+<g >
+<title>__this_cpu_preempt_check (45,301,958 samples, 0.03%)</title><rect x="538.7" y="245" width="0.5" height="15.0" fill="rgb(254,129,129)" rx="2" ry="2" />
+<text  x="541.72" y="255.5" ></text>
+</g>
+<g >
+<title>__brk (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="389" width="3.5" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="1454.32" y="399.5" ></text>
+</g>
+<g >
+<title>TObjArray::Delete (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="485" width="0.5" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="1457.81" y="495.5" ></text>
+</g>
+<g >
+<title>TLeafI::GetValue (226,409,944 samples, 0.17%)</title><rect x="552.2" y="501" width="2.5" height="15.0" fill="rgb(202,202,60)" rx="2" ry="2" />
+<text  x="555.22" y="511.5" ></text>
+</g>
+<g >
+<title>ROOT::Math::LorentzVector&lt;ROOT::Math::PtEtaPhiM4D&lt;double&gt; &gt;::operator+=&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PtEtaPhiM4D&lt;double&gt; &gt; &gt; (14,638,019,688 samples, 10.91%)</title><rect x="1040.3" y="613" width="161.5" height="15.0" fill="rgb(202,202,60)" rx="2" ry="2" />
+<text  x="1043.27" y="623.5" >ROOT::Math::LorentzV..</text>
+</g>
+<g >
+<title>dl_main (84,398,257 samples, 0.06%)</title><rect x="11.8" y="757" width="0.9" height="15.0" fill="rgb(237,105,105)" rx="2" ry="2" />
+<text  x="14.80" y="767.5" ></text>
+</g>
+<g >
+<title>get_mem_cgroup_from_mm (45,299,009 samples, 0.03%)</title><rect x="540.2" y="325" width="0.5" height="15.0" fill="rgb(248,120,120)" rx="2" ry="2" />
+<text  x="543.22" y="335.5" ></text>
+</g>
+<g >
+<title>get_mem_cgroup_from_mm (135,905,565 samples, 0.10%)</title><rect x="516.2" y="325" width="1.5" height="15.0" fill="rgb(201,52,52)" rx="2" ry="2" />
+<text  x="519.23" y="335.5" ></text>
+</g>
+<g >
+<title>TSystem::Load (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="549" width="0.5" height="15.0" fill="rgb(181,181,52)" rx="2" ry="2" />
+<text  x="1487.76" y="559.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RTreeColumnReader&lt;unsigned int&gt;::GetImpl (5,848,667,623 samples, 4.36%)</title><rect x="1353.7" y="661" width="64.6" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="1356.73" y="671.5" >ROOT::I..</text>
+</g>
+<g >
+<title>__memset_evex_unaligned_erms (90,633,218 samples, 0.07%)</title><rect x="539.7" y="437" width="1.0" height="15.0" fill="rgb(206,59,59)" rx="2" ry="2" />
+<text  x="542.72" y="447.5" ></text>
+</g>
+<g >
+<title>ld-linux-x86-64 (61,804,087 samples, 0.05%)</title><rect x="10.0" y="821" width="0.7" height="15.0" fill="rgb(212,68,68)" rx="2" ry="2" />
+<text  x="13.00" y="831.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="357" width="0.5" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="1487.76" y="367.5" ></text>
+</g>
+<g >
+<title>__sincos_fma (226,621,285 samples, 0.17%)</title><rect x="824.2" y="549" width="2.5" height="15.0" fill="rgb(204,56,56)" rx="2" ry="2" />
+<text  x="827.16" y="559.5" ></text>
+</g>
+<g >
+<title>cling::IncrementalExecutor::executeWrapper (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="453" width="0.5" height="15.0" fill="rgb(181,181,52)" rx="2" ry="2" />
+<text  x="1489.75" y="463.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (498,310,956 samples, 0.37%)</title><rect x="516.2" y="405" width="5.5" height="15.0" fill="rgb(200,51,51)" rx="2" ry="2" />
+<text  x="519.23" y="415.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::GetROOT2 (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="597" width="25.5" height="15.0" fill="rgb(207,207,61)" rx="2" ry="2" />
+<text  x="1462.31" y="607.5" >R..</text>
+</g>
+<g >
+<title>TClass::GetBaseClassOffsetRecurse (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="517" width="0.5" height="15.0" fill="rgb(191,191,55)" rx="2" ry="2" />
+<text  x="1488.25" y="527.5" ></text>
+</g>
+<g >
+<title>R__unzip (32,727,976,631 samples, 24.40%)</title><rect x="147.6" y="453" width="361.1" height="15.0" fill="rgb(210,65,65)" rx="2" ry="2" />
+<text  x="150.59" y="463.5" >R__unzip</text>
+</g>
+<g >
+<title>folio_mapping (45,261,621 samples, 0.03%)</title><rect x="1333.7" y="389" width="0.5" height="15.0" fill="rgb(243,113,113)" rx="2" ry="2" />
+<text  x="1336.75" y="399.5" ></text>
+</g>
+<g >
+<title>llvm::orc::LambdaSymbolResolver&lt;cling::IncrementalJIT::IncrementalJIT (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="261" width="0.5" height="15.0" fill="rgb(200,200,59)" rx="2" ry="2" />
+<text  x="1489.75" y="271.5" ></text>
+</g>
+<g >
+<title>clang::CodeGeneratorImpl::HandleTopLevelDecl (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="485" width="0.5" height="15.0" fill="rgb(203,203,60)" rx="2" ry="2" />
+<text  x="1489.25" y="495.5" ></text>
+</g>
+<g >
+<title>__sinh (135,849,101 samples, 0.10%)</title><rect x="826.7" y="549" width="1.5" height="15.0" fill="rgb(228,91,91)" rx="2" ry="2" />
+<text  x="829.66" y="559.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadInt (90,282,893 samples, 0.07%)</title><rect x="1412.3" y="613" width="1.0" height="15.0" fill="rgb(190,190,55)" rx="2" ry="2" />
+<text  x="1415.27" y="623.5" ></text>
+</g>
+<g >
+<title>__alloc_pages (135,905,120 samples, 0.10%)</title><rect x="537.7" y="309" width="1.5" height="15.0" fill="rgb(230,93,93)" rx="2" ry="2" />
+<text  x="540.72" y="319.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (135,874,150 samples, 0.10%)</title><rect x="540.7" y="421" width="1.5" height="15.0" fill="rgb(202,53,53)" rx="2" ry="2" />
+<text  x="543.72" y="431.5" ></text>
+</g>
+<g >
+<title>llvm::orc::LazyEmittingLayer&lt;llvm::orc::LegacyIRCompileLayer&lt;cling::IncrementalJIT::RemovableObjectLinkingLayer, llvm::orc::SimpleCompiler&gt; &gt;::EmissionDeferredModule::find (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="213" width="0.5" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="1489.75" y="223.5" ></text>
+</g>
+<g >
+<title>TFile::~TFile (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="645" width="4.0" height="15.0" fill="rgb(178,178,51)" rx="2" ry="2" />
+<text  x="1454.32" y="655.5" ></text>
+</g>
+<g >
+<title>systrim.constprop.0 (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="421" width="3.5" height="15.0" fill="rgb(226,88,88)" rx="2" ry="2" />
+<text  x="1454.32" y="431.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (84,245,949 samples, 0.06%)</title><rect x="11.8" y="645" width="0.9" height="15.0" fill="rgb(236,102,102)" rx="2" ry="2" />
+<text  x="14.80" y="655.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::basic_string&lt;std::allocator&lt;char&gt; &gt; (90,639,760 samples, 0.07%)</title><rect x="612.2" y="533" width="1.0" height="15.0" fill="rgb(209,209,62)" rx="2" ry="2" />
+<text  x="615.19" y="543.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::GetType (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="309" width="0.5" height="15.0" fill="rgb(200,200,59)" rx="2" ry="2" />
+<text  x="1488.25" y="319.5" ></text>
+</g>
+<g >
+<title>TBranch::GetEntry (90,633,315 samples, 0.07%)</title><rect x="594.2" y="533" width="1.0" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="597.20" y="543.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (84,245,949 samples, 0.06%)</title><rect x="11.8" y="629" width="0.9" height="15.0" fill="rgb(208,62,62)" rx="2" ry="2" />
+<text  x="14.80" y="639.5" ></text>
+</g>
+<g >
+<title>__mod_lruvec_state (45,225,288 samples, 0.03%)</title><rect x="541.7" y="309" width="0.5" height="15.0" fill="rgb(204,56,56)" rx="2" ry="2" />
+<text  x="544.72" y="319.5" ></text>
+</g>
+<g >
+<title>TUrl::TUrl (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="677" width="25.5" height="15.0" fill="rgb(186,186,54)" rx="2" ry="2" />
+<text  x="1462.31" y="687.5" >T..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (316,761,376 samples, 0.24%)</title><rect x="535.7" y="405" width="3.5" height="15.0" fill="rgb(213,69,69)" rx="2" ry="2" />
+<text  x="538.73" y="415.5" ></text>
+</g>
+<g >
+<title>TROOT::LoadClass (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="405" width="0.5" height="15.0" fill="rgb(217,217,65)" rx="2" ry="2" />
+<text  x="1488.75" y="415.5" ></text>
+</g>
+<g >
+<title>clang::CXXRecordDecl::DefinitionData::getBasesSlowCase (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="389" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1488.25" y="399.5" ></text>
+</g>
+<g >
+<title>TH1::Paint (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="661" width="0.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1488.25" y="671.5" ></text>
+</g>
+<g >
+<title>adler32_z (90,592,320 samples, 0.07%)</title><rect x="1450.3" y="597" width="1.0" height="15.0" fill="rgb(222,82,82)" rx="2" ry="2" />
+<text  x="1453.32" y="607.5" ></text>
+</g>
+<g >
+<title>TListOfDataMembers::Load (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="533" width="0.5" height="15.0" fill="rgb(228,228,69)" rx="2" ry="2" />
+<text  x="1488.75" y="543.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (61,804,087 samples, 0.05%)</title><rect x="10.0" y="661" width="0.7" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="13.00" y="671.5" ></text>
+</g>
+<g >
+<title>TEnv::Getvalue (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="613" width="25.5" height="15.0" fill="rgb(211,211,63)" rx="2" ry="2" />
+<text  x="1462.31" y="623.5" >T..</text>
+</g>
+<g >
+<title>TBaseClass::GetDelta (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="501" width="0.5" height="15.0" fill="rgb(212,212,63)" rx="2" ry="2" />
+<text  x="1488.25" y="511.5" ></text>
+</g>
+<g >
+<title>uncharge_folio (45,319,110 samples, 0.03%)</title><rect x="1453.3" y="213" width="0.5" height="15.0" fill="rgb(232,97,97)" rx="2" ry="2" />
+<text  x="1456.31" y="223.5" ></text>
+</g>
+<g >
+<title>do_lookup_x (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="293" width="0.5" height="15.0" fill="rgb(217,75,75)" rx="2" ry="2" />
+<text  x="1487.76" y="303.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::GenerateCode (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="389" width="0.5" height="15.0" fill="rgb(179,179,51)" rx="2" ry="2" />
+<text  x="1489.25" y="399.5" ></text>
+</g>
+<g >
+<title>__default_morecore@GLIBC_2.2.5 (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="405" width="3.5" height="15.0" fill="rgb(235,102,102)" rx="2" ry="2" />
+<text  x="1454.32" y="415.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::TSchemaRuleSet::AddRule (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="581" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1488.75" y="591.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RTreeColumnReader&lt;ROOT::VecOps::RVec&lt;float&gt; &gt;::GetImpl (453,083,460 samples, 0.34%)</title><rect x="830.2" y="565" width="5.0" height="15.0" fill="rgb(186,186,54)" rx="2" ry="2" />
+<text  x="833.16" y="575.5" ></text>
+</g>
+<g >
+<title>__memset_evex_unaligned_erms (905,957,219 samples, 0.68%)</title><rect x="511.7" y="437" width="10.0" height="15.0" fill="rgb(238,105,105)" rx="2" ry="2" />
+<text  x="514.74" y="447.5" ></text>
+</g>
+<g >
+<title>TBranch::ReadLeaves1Impl (271,467,887 samples, 0.20%)</title><rect x="554.7" y="517" width="3.0" height="15.0" fill="rgb(223,223,67)" rx="2" ry="2" />
+<text  x="557.71" y="527.5" ></text>
+</g>
+<g >
+<title>release_pages (181,061,574 samples, 0.13%)</title><rect x="1452.8" y="245" width="2.0" height="15.0" fill="rgb(232,97,97)" rx="2" ry="2" />
+<text  x="1455.82" y="255.5" ></text>
+</g>
+<g >
+<title>tlb_flush_mmu (181,061,574 samples, 0.13%)</title><rect x="1452.8" y="261" width="2.0" height="15.0" fill="rgb(246,117,117)" rx="2" ry="2" />
+<text  x="1455.82" y="271.5" ></text>
+</g>
+<g >
+<title>TBranch::ReadLeaves1Impl (45,240,484 samples, 0.03%)</title><rect x="1411.8" y="613" width="0.5" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="1414.77" y="623.5" ></text>
+</g>
+<g >
+<title>main (156,289,145 samples, 0.12%)</title><rect x="1488.3" y="757" width="1.7" height="15.0" fill="rgb(230,94,94)" rx="2" ry="2" />
+<text  x="1491.28" y="767.5" ></text>
+</g>
+<g >
+<title>__pagevec_lru_add (45,261,621 samples, 0.03%)</title><rect x="1333.7" y="405" width="0.5" height="15.0" fill="rgb(229,92,92)" rx="2" ry="2" />
+<text  x="1336.75" y="415.5" ></text>
+</g>
+<g >
+<title>vm_mmap_pgoff (61,804,087 samples, 0.05%)</title><rect x="10.0" y="613" width="0.7" height="15.0" fill="rgb(219,77,77)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RTreeColumnReader&lt;ROOT::VecOps::RVec&lt;float&gt; &gt;::GetImpl (10,325,454,091 samples, 7.70%)</title><rect x="1237.3" y="629" width="113.9" height="15.0" fill="rgb(208,208,62)" rx="2" ry="2" />
+<text  x="1240.29" y="639.5" >ROOT::Internal..</text>
+</g>
+<g >
+<title>__list_del_entry_valid (90,635,510 samples, 0.07%)</title><rect x="519.7" y="277" width="1.0" height="15.0" fill="rgb(202,52,52)" rx="2" ry="2" />
+<text  x="522.73" y="287.5" ></text>
+</g>
+<g >
+<title>_dl_catch_error (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="533" width="25.5" height="15.0" fill="rgb(245,115,115)" rx="2" ry="2" />
+<text  x="1462.31" y="543.5" >_..</text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (156,289,145 samples, 0.12%)</title><rect x="1488.3" y="789" width="1.7" height="15.0" fill="rgb(239,108,108)" rx="2" ry="2" />
+<text  x="1491.28" y="799.5" ></text>
+</g>
+<g >
+<title>inflate (90,592,320 samples, 0.07%)</title><rect x="1450.3" y="613" width="1.0" height="15.0" fill="rgb(203,54,54)" rx="2" ry="2" />
+<text  x="1453.32" y="623.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitCXXConstructorCall (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="101" width="0.5" height="15.0" fill="rgb(202,202,59)" rx="2" ry="2" />
+<text  x="1489.25" y="111.5" ></text>
+</g>
+<g >
+<title>__expm1 (226,212,969 samples, 0.17%)</title><rect x="1102.4" y="581" width="2.5" height="15.0" fill="rgb(234,100,100)" rx="2" ry="2" />
+<text  x="1105.36" y="591.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (84,245,949 samples, 0.06%)</title><rect x="11.8" y="597" width="0.9" height="15.0" fill="rgb(245,116,116)" rx="2" ry="2" />
+<text  x="14.80" y="607.5" ></text>
+</g>
+<g >
+<title>_dl_map_object (61,804,087 samples, 0.05%)</title><rect x="10.0" y="693" width="0.7" height="15.0" fill="rgb(203,54,54)" rx="2" ry="2" />
+<text  x="13.00" y="703.5" ></text>
+</g>
+<g >
+<title>_dl_lookup_symbol_x (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="389" width="25.5" height="15.0" fill="rgb(243,113,113)" rx="2" ry="2" />
+<text  x="1462.31" y="399.5" >_..</text>
+</g>
+<g >
+<title>TClass::PostLoadCheck (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="565" width="0.5" height="15.0" fill="rgb(206,206,61)" rx="2" ry="2" />
+<text  x="1488.25" y="575.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (45,306,459 samples, 0.03%)</title><rect x="509.2" y="309" width="0.5" height="15.0" fill="rgb(248,121,121)" rx="2" ry="2" />
+<text  x="512.24" y="319.5" ></text>
+</g>
+<g >
+<title>__sinh_finite@GLIBC_2.15 (271,537,363 samples, 0.20%)</title><rect x="820.2" y="533" width="3.0" height="15.0" fill="rgb(232,97,97)" rx="2" ry="2" />
+<text  x="823.16" y="543.5" ></text>
+</g>
+<g >
+<title>__cosh (90,462,043 samples, 0.07%)</title><rect x="823.2" y="549" width="1.0" height="15.0" fill="rgb(220,79,79)" rx="2" ry="2" />
+<text  x="826.16" y="559.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitBinaryOperatorLValue (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="213" width="0.5" height="15.0" fill="rgb(226,226,68)" rx="2" ry="2" />
+<text  x="1489.25" y="223.5" ></text>
+</g>
+<g >
+<title>TDirectoryFile::Get (90,592,320 samples, 0.07%)</title><rect x="1450.3" y="661" width="1.0" height="15.0" fill="rgb(214,214,64)" rx="2" ry="2" />
+<text  x="1453.32" y="671.5" ></text>
+</g>
+<g >
+<title>malloc (90,606,979 samples, 0.07%)</title><rect x="508.7" y="405" width="1.0" height="15.0" fill="rgb(247,118,118)" rx="2" ry="2" />
+<text  x="511.74" y="415.5" ></text>
+</g>
+<g >
+<title>_int_malloc (45,333,633 samples, 0.03%)</title><rect x="539.2" y="389" width="0.5" height="15.0" fill="rgb(242,111,111)" rx="2" ry="2" />
+<text  x="542.22" y="399.5" ></text>
+</g>
+<g >
+<title>TBranch::GetEntry (135,926,990 samples, 0.10%)</title><rect x="1415.3" y="629" width="1.5" height="15.0" fill="rgb(224,224,68)" rx="2" ry="2" />
+<text  x="1418.27" y="639.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;rdataframe (69,003,649,984 samples, 51.45%)</title><rect x="68.7" y="565" width="761.5" height="15.0" fill="rgb(206,206,61)" rx="2" ry="2" />
+<text  x="71.71" y="575.5" >ROOT::Detail::RDF::RDefine&lt;rdataframe</text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitAggExpr (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="133" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1489.25" y="143.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;ROOT::VecOps::RVec&lt;unsigned long&gt;  (17,455,343,120 samples, 13.01%)</title><rect x="838.2" y="597" width="192.6" height="15.0" fill="rgb(207,207,61)" rx="2" ry="2" />
+<text  x="841.16" y="607.5" >std::_Function_handler&lt;RO..</text>
+</g>
+<g >
+<title>__mem_cgroup_charge (45,306,459 samples, 0.03%)</title><rect x="509.2" y="293" width="0.5" height="15.0" fill="rgb(231,95,95)" rx="2" ry="2" />
+<text  x="512.24" y="303.5" ></text>
+</g>
+<g >
+<title>__atan2 (90,618,284 samples, 0.07%)</title><rect x="1201.8" y="613" width="1.0" height="15.0" fill="rgb(200,50,50)" rx="2" ry="2" />
+<text  x="1204.80" y="623.5" ></text>
+</g>
+<g >
+<title>TListIter::Next (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="357" width="0.5" height="15.0" fill="rgb(179,179,51)" rx="2" ry="2" />
+<text  x="1488.75" y="367.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RAction&lt;ROOT::Internal::RDF::FillHelper&lt;TH1D&gt;, ROOT::Detail::RDF::RFilter&lt;rdataframe (90,631,919 samples, 0.07%)</title><rect x="1433.8" y="693" width="1.0" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1436.83" y="703.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (498,310,956 samples, 0.37%)</title><rect x="516.2" y="357" width="5.5" height="15.0" fill="rgb(248,120,120)" rx="2" ry="2" />
+<text  x="519.23" y="367.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::ProxyReadTemplate&lt;&amp;ROOT::Detail::TBranchProxy::ReadNoParentNoBranchCountNoCollection&gt; (135,826,374 samples, 0.10%)</title><rect x="1416.8" y="645" width="1.5" height="15.0" fill="rgb(202,202,59)" rx="2" ry="2" />
+<text  x="1419.77" y="655.5" ></text>
+</g>
+<g >
+<title>TBranch::GetBasketImpl (35,762,403,184 samples, 26.66%)</title><rect x="147.6" y="485" width="394.6" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="150.59" y="495.5" >TBranch::GetBasketImpl</text>
+</g>
+<g >
+<title>cling::DynamicLibraryManager::loadLibrary (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="517" width="0.5" height="15.0" fill="rgb(211,211,63)" rx="2" ry="2" />
+<text  x="1487.76" y="527.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitIgnoredExpr (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="245" width="0.5" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="1489.25" y="255.5" ></text>
+</g>
+<g >
+<title>TCling::ShallowAutoLoadImpl (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="421" width="0.5" height="15.0" fill="rgb(185,185,53)" rx="2" ry="2" />
+<text  x="1488.75" y="431.5" ></text>
+</g>
+<g >
+<title>_int_free (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="437" width="3.5" height="15.0" fill="rgb(217,75,75)" rx="2" ry="2" />
+<text  x="1454.32" y="447.5" ></text>
+</g>
+<g >
+<title>__mem_cgroup_charge (45,325,267 samples, 0.03%)</title><rect x="524.7" y="357" width="0.5" height="15.0" fill="rgb(220,80,80)" rx="2" ry="2" />
+<text  x="527.73" y="367.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (90,617,240 samples, 0.07%)</title><rect x="1409.3" y="501" width="1.0" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="1412.27" y="511.5" ></text>
+</g>
+<g >
+<title>@plt (45,320,669 samples, 0.03%)</title><rect x="1100.9" y="581" width="0.5" height="15.0" fill="rgb(205,57,57)" rx="2" ry="2" />
+<text  x="1103.86" y="591.5" ></text>
+</g>
+<g >
+<title>TPluginManager::LoadHandlersFromPluginDirs (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="677" width="0.5" height="15.0" fill="rgb(195,195,57)" rx="2" ry="2" />
+<text  x="1489.75" y="687.5" ></text>
+</g>
+<g >
+<title>[libAfterImage.so.0.99] (45,230,447 samples, 0.03%)</title><rect x="11.3" y="773" width="0.5" height="15.0" fill="rgb(238,105,105)" rx="2" ry="2" />
+<text  x="14.26" y="783.5" ></text>
+</g>
+<g >
+<title>page_add_new_anon_rmap (45,271,837 samples, 0.03%)</title><rect x="521.2" y="341" width="0.5" height="15.0" fill="rgb(234,100,100)" rx="2" ry="2" />
+<text  x="524.23" y="351.5" ></text>
+</g>
+<g >
+<title>StoreAnyExprIntoOneUnit (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="149" width="0.5" height="15.0" fill="rgb(226,87,87)" rx="2" ry="2" />
+<text  x="1489.25" y="159.5" ></text>
+</g>
+<g >
+<title>malloc (135,904,841 samples, 0.10%)</title><rect x="609.7" y="517" width="1.5" height="15.0" fill="rgb(225,87,87)" rx="2" ry="2" />
+<text  x="612.70" y="527.5" ></text>
+</g>
+<g >
+<title>__do_sys_brk (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="341" width="3.5" height="15.0" fill="rgb(215,72,72)" rx="2" ry="2" />
+<text  x="1454.32" y="351.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (181,099,960 samples, 0.14%)</title><rect x="537.2" y="341" width="2.0" height="15.0" fill="rgb(226,89,89)" rx="2" ry="2" />
+<text  x="540.22" y="351.5" ></text>
+</g>
+<g >
+<title>unmap_vmas (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="261" width="0.5" height="15.0" fill="rgb(222,82,82)" rx="2" ry="2" />
+<text  x="1457.81" y="271.5" ></text>
+</g>
+<g >
+<title>TLeafI::ReadBasket (181,282,474 samples, 0.14%)</title><rect x="1413.3" y="613" width="2.0" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1416.27" y="623.5" ></text>
+</g>
+<g >
+<title>llvm::JITSymbol::getAddress (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="421" width="0.5" height="15.0" fill="rgb(193,193,56)" rx="2" ry="2" />
+<text  x="1489.75" y="431.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadFastArray (316,891,400 samples, 0.24%)</title><rect x="1341.7" y="597" width="3.5" height="15.0" fill="rgb(181,181,52)" rx="2" ry="2" />
+<text  x="1344.73" y="607.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::compileFunction (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="597" width="0.5" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="1489.25" y="607.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::DeclareInternal (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="549" width="0.5" height="15.0" fill="rgb(189,189,55)" rx="2" ry="2" />
+<text  x="1489.25" y="559.5" ></text>
+</g>
+<g >
+<title>TTree::~TTree (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="549" width="4.0" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="1454.32" y="559.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;std::function&lt;ROOT::VecOps::RVec&lt;unsigned long&gt;  (181,268,867 samples, 0.14%)</title><rect x="1235.3" y="613" width="2.0" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1238.29" y="623.5" ></text>
+</g>
+<g >
+<title>__mod_zone_page_state (45,301,958 samples, 0.03%)</title><rect x="538.7" y="261" width="0.5" height="15.0" fill="rgb(240,109,109)" rx="2" ry="2" />
+<text  x="541.72" y="271.5" ></text>
+</g>
+<g >
+<title>check_preemption_disabled (45,225,288 samples, 0.03%)</title><rect x="541.7" y="277" width="0.5" height="15.0" fill="rgb(245,116,116)" rx="2" ry="2" />
+<text  x="544.72" y="287.5" ></text>
+</g>
+<g >
+<title>TPluginHandler::LoadPlugin (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="661" width="0.5" height="15.0" fill="rgb(191,191,55)" rx="2" ry="2" />
+<text  x="1487.76" y="671.5" ></text>
+</g>
+<g >
+<title>TBranch::GetEntry (8,331,908,394 samples, 6.21%)</title><rect x="1247.8" y="597" width="91.9" height="15.0" fill="rgb(222,222,67)" rx="2" ry="2" />
+<text  x="1250.79" y="607.5" >TBranch::G..</text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenModule::EmitDeclContext (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="469" width="0.5" height="15.0" fill="rgb(188,188,55)" rx="2" ry="2" />
+<text  x="1489.25" y="479.5" ></text>
+</g>
+<g >
+<title>TBasket::ResetEntryOffset (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="437" width="0.5" height="15.0" fill="rgb(200,200,59)" rx="2" ry="2" />
+<text  x="1457.81" y="447.5" ></text>
+</g>
+<g >
+<title>_start (133,623,506,332 samples, 99.63%)</title><rect x="12.7" y="805" width="1474.6" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="15.73" y="815.5" >_start</text>
+</g>
+<g >
+<title>TFile::ReadBuffers (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="501" width="15.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1396.78" y="511.5" ></text>
+</g>
+<g >
+<title>__pagevec_lru_add (45,328,307 samples, 0.03%)</title><rect x="520.7" y="325" width="0.5" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="523.73" y="335.5" ></text>
+</g>
+<g >
+<title>malloc (45,145,348 samples, 0.03%)</title><rect x="611.7" y="533" width="0.5" height="15.0" fill="rgb(223,83,83)" rx="2" ry="2" />
+<text  x="614.70" y="543.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (45,225,288 samples, 0.03%)</title><rect x="541.7" y="373" width="0.5" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="544.72" y="383.5" ></text>
+</g>
+<g >
+<title>__expm1 (7,655,473,465 samples, 5.71%)</title><rect x="713.7" y="517" width="84.5" height="15.0" fill="rgb(236,103,103)" rx="2" ry="2" />
+<text  x="716.70" y="527.5" >__expm1</text>
+</g>
+<g >
+<title>TPluginManager::FindHandler (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="693" width="0.5" height="15.0" fill="rgb(207,207,61)" rx="2" ry="2" />
+<text  x="1489.75" y="703.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (181,171,763 samples, 0.14%)</title><rect x="509.7" y="437" width="2.0" height="15.0" fill="rgb(239,107,107)" rx="2" ry="2" />
+<text  x="512.74" y="447.5" ></text>
+</g>
+<g >
+<title>TClass::CreateListOfDataMembers (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="549" width="0.5" height="15.0" fill="rgb(193,193,56)" rx="2" ry="2" />
+<text  x="1488.75" y="559.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (135,789,962 samples, 0.10%)</title><rect x="1335.7" y="501" width="1.5" height="15.0" fill="rgb(250,124,124)" rx="2" ry="2" />
+<text  x="1338.75" y="511.5" ></text>
+</g>
+<g >
+<title>folio_add_lru (45,261,621 samples, 0.03%)</title><rect x="1333.7" y="421" width="0.5" height="15.0" fill="rgb(216,74,74)" rx="2" ry="2" />
+<text  x="1336.75" y="431.5" ></text>
+</g>
+<g >
+<title>do_group_exit (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="757" width="1.0" height="15.0" fill="rgb(225,87,87)" rx="2" ry="2" />
+<text  x="1490.28" y="767.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (45,306,459 samples, 0.03%)</title><rect x="509.2" y="357" width="0.5" height="15.0" fill="rgb(208,62,62)" rx="2" ry="2" />
+<text  x="512.24" y="367.5" ></text>
+</g>
+<g >
+<title>mmput (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="725" width="1.0" height="15.0" fill="rgb(212,67,67)" rx="2" ry="2" />
+<text  x="1490.28" y="735.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (45,296,732 samples, 0.03%)</title><rect x="1410.3" y="501" width="0.5" height="15.0" fill="rgb(253,127,127)" rx="2" ry="2" />
+<text  x="1413.27" y="511.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitFunctionBody (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="373" width="0.5" height="15.0" fill="rgb(226,226,68)" rx="2" ry="2" />
+<text  x="1489.25" y="383.5" ></text>
+</g>
+<g >
+<title>operator new (45,333,633 samples, 0.03%)</title><rect x="539.2" y="421" width="0.5" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="542.22" y="431.5" ></text>
+</g>
+<g >
+<title>cling::MetaProcessor::process (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="549" width="0.5" height="15.0" fill="rgb(189,189,55)" rx="2" ry="2" />
+<text  x="1489.75" y="559.5" ></text>
+</g>
+<g >
+<title>copy_user_enhanced_fast_string (1,222,701,684 samples, 0.91%)</title><rect x="1394.3" y="341" width="13.5" height="15.0" fill="rgb(250,123,123)" rx="2" ry="2" />
+<text  x="1397.28" y="351.5" ></text>
+</g>
+<g >
+<title>__rcu_read_lock (45,271,837 samples, 0.03%)</title><rect x="521.2" y="309" width="0.5" height="15.0" fill="rgb(244,115,115)" rx="2" ry="2" />
+<text  x="524.23" y="319.5" ></text>
+</g>
+<g >
+<title>__sincos_fma (2,942,875,945 samples, 2.19%)</title><rect x="1125.8" y="597" width="32.5" height="15.0" fill="rgb(200,50,50)" rx="2" ry="2" />
+<text  x="1128.85" y="607.5" >__..</text>
+</g>
+<g >
+<title>alloc_pages_vma (271,805,247 samples, 0.20%)</title><rect x="517.7" y="341" width="3.0" height="15.0" fill="rgb(225,87,87)" rx="2" ry="2" />
+<text  x="520.73" y="351.5" ></text>
+</g>
+<g >
+<title>TBranch::~TBranch (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="501" width="4.0" height="15.0" fill="rgb(180,180,51)" rx="2" ry="2" />
+<text  x="1454.32" y="511.5" ></text>
+</g>
+<g >
+<title>_raw_spin_lock (45,228,803 samples, 0.03%)</title><rect x="1333.2" y="421" width="0.5" height="15.0" fill="rgb(226,88,88)" rx="2" ry="2" />
+<text  x="1336.25" y="431.5" ></text>
+</g>
+<g >
+<title>openaux (61,804,087 samples, 0.05%)</title><rect x="10.0" y="709" width="0.7" height="15.0" fill="rgb(243,113,113)" rx="2" ry="2" />
+<text  x="13.00" y="719.5" ></text>
+</g>
+<g >
+<title>TClingCallFunc::ExecT&lt;long&gt; (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="661" width="0.5" height="15.0" fill="rgb(187,187,54)" rx="2" ry="2" />
+<text  x="1489.25" y="671.5" ></text>
+</g>
+<g >
+<title>TCling::DeepAutoLoadImpl (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="597" width="0.5" height="15.0" fill="rgb(180,180,51)" rx="2" ry="2" />
+<text  x="1487.76" y="607.5" ></text>
+</g>
+<g >
+<title>__alloc_pages (271,805,247 samples, 0.20%)</title><rect x="517.7" y="325" width="3.0" height="15.0" fill="rgb(201,52,52)" rx="2" ry="2" />
+<text  x="520.73" y="335.5" ></text>
+</g>
+<g >
+<title>TClass::LoadClass (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="597" width="0.5" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="1488.25" y="607.5" ></text>
+</g>
+<g >
+<title>llvm::TargetPassConfig::addPass (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="133" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1489.75" y="143.5" ></text>
+</g>
+<g >
+<title>page_remove_rmap (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="229" width="0.5" height="15.0" fill="rgb(201,52,52)" rx="2" ry="2" />
+<text  x="1457.81" y="239.5" ></text>
+</g>
+<g >
+<title>strlen@plt (45,326,796 samples, 0.03%)</title><rect x="613.2" y="533" width="0.5" height="15.0" fill="rgb(216,73,73)" rx="2" ry="2" />
+<text  x="616.19" y="543.5" ></text>
+</g>
+<g >
+<title>inflate_table (181,070,021 samples, 0.14%)</title><rect x="1329.7" y="501" width="2.0" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="1332.75" y="511.5" ></text>
+</g>
+<g >
+<title>_dl_open (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="485" width="25.5" height="15.0" fill="rgb(210,64,64)" rx="2" ry="2" />
+<text  x="1462.31" y="495.5" >_..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (45,299,009 samples, 0.03%)</title><rect x="540.2" y="421" width="0.5" height="15.0" fill="rgb(235,102,102)" rx="2" ry="2" />
+<text  x="543.22" y="431.5" ></text>
+</g>
+<g >
+<title>filemap_read (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="373" width="15.5" height="15.0" fill="rgb(242,111,111)" rx="2" ry="2" />
+<text  x="1396.78" y="383.5" ></text>
+</g>
+<g >
+<title>__free_one_page (90,577,772 samples, 0.07%)</title><rect x="1453.8" y="197" width="1.0" height="15.0" fill="rgb(249,122,122)" rx="2" ry="2" />
+<text  x="1456.81" y="207.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::VecOps::RVecImpl&lt;float&gt;::swap (679,553,605 samples, 0.51%)</title><rect x="571.2" y="533" width="7.5" height="15.0" fill="rgb(226,226,68)" rx="2" ry="2" />
+<text  x="574.20" y="543.5" ></text>
+</g>
+<g >
+<title>TApplication::ExecuteFile (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="613" width="0.5" height="15.0" fill="rgb(197,197,58)" rx="2" ry="2" />
+<text  x="1489.75" y="623.5" ></text>
+</g>
+<g >
+<title>TH1::Fill (135,861,132 samples, 0.10%)</title><rect x="1435.3" y="693" width="1.5" height="15.0" fill="rgb(208,208,62)" rx="2" ry="2" />
+<text  x="1438.33" y="703.5" ></text>
+</g>
+<g >
+<title>R__unzip (1,132,343,806 samples, 0.84%)</title><rect x="1381.3" y="549" width="12.5" height="15.0" fill="rgb(217,74,74)" rx="2" ry="2" />
+<text  x="1384.29" y="559.5" ></text>
+</g>
+<g >
+<title>TFileCacheRead::ReadBuffer (1,267,681,403 samples, 0.95%)</title><rect x="525.2" y="437" width="14.0" height="15.0" fill="rgb(204,204,60)" rx="2" ry="2" />
+<text  x="528.23" y="447.5" ></text>
+</g>
+<g >
+<title>__ieee754_log_fma (1,313,269,521 samples, 0.98%)</title><rect x="1205.8" y="613" width="14.5" height="15.0" fill="rgb(245,116,116)" rx="2" ry="2" />
+<text  x="1208.80" y="623.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::TBranchProxy::Read (40,970,242,190 samples, 30.55%)</title><rect x="119.1" y="533" width="452.1" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="122.10" y="543.5" >ROOT::Detail::TBranchProxy::Read</text>
+</g>
+<g >
+<title>dl_open_worker (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="373" width="0.5" height="15.0" fill="rgb(202,53,53)" rx="2" ry="2" />
+<text  x="1487.76" y="383.5" ></text>
+</g>
+<g >
+<title>TBranch::GetEntry (38,524,537,277 samples, 28.72%)</title><rect x="129.6" y="517" width="425.1" height="15.0" fill="rgb(188,188,54)" rx="2" ry="2" />
+<text  x="132.60" y="527.5" >TBranch::GetEntry</text>
+</g>
+<g >
+<title>__handle_mm_fault (45,283,405 samples, 0.03%)</title><rect x="1336.7" y="421" width="0.5" height="15.0" fill="rgb(231,96,96)" rx="2" ry="2" />
+<text  x="1339.74" y="431.5" ></text>
+</g>
+<g >
+<title>TImage::Create (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="677" width="0.5" height="15.0" fill="rgb(202,202,59)" rx="2" ry="2" />
+<text  x="1487.76" y="687.5" ></text>
+</g>
+<g >
+<title>_dl_map_object_deps (61,804,087 samples, 0.05%)</title><rect x="10.0" y="741" width="0.7" height="15.0" fill="rgb(225,86,86)" rx="2" ry="2" />
+<text  x="13.00" y="751.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitStmt (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="325" width="0.5" height="15.0" fill="rgb(179,179,51)" rx="2" ry="2" />
+<text  x="1489.25" y="335.5" ></text>
+</g>
+<g >
+<title>TFileCacheRead::ReadBuffer (135,789,962 samples, 0.10%)</title><rect x="1335.7" y="517" width="1.5" height="15.0" fill="rgb(183,183,53)" rx="2" ry="2" />
+<text  x="1338.75" y="527.5" ></text>
+</g>
+<g >
+<title>__sinh_finite@GLIBC_2.15 (135,667,931 samples, 0.10%)</title><rect x="1200.3" y="597" width="1.5" height="15.0" fill="rgb(220,80,80)" rx="2" ry="2" />
+<text  x="1203.30" y="607.5" ></text>
+</g>
+<g >
+<title>cling::MetaParser::isXCommand (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="517" width="0.5" height="15.0" fill="rgb(203,203,60)" rx="2" ry="2" />
+<text  x="1489.75" y="527.5" ></text>
+</g>
+<g >
+<title>__pagevec_lru_add (45,225,288 samples, 0.03%)</title><rect x="541.7" y="325" width="0.5" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="544.72" y="335.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (90,490,424 samples, 0.07%)</title><rect x="1333.2" y="437" width="1.0" height="15.0" fill="rgb(200,50,50)" rx="2" ry="2" />
+<text  x="1336.25" y="447.5" ></text>
+</g>
+<g >
+<title>_dl_map_object (84,398,257 samples, 0.06%)</title><rect x="11.8" y="693" width="0.9" height="15.0" fill="rgb(219,78,78)" rx="2" ry="2" />
+<text  x="14.80" y="703.5" ></text>
+</g>
+<g >
+<title>llvm::JITSymbol::getAddress (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="373" width="0.5" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="1489.75" y="383.5" ></text>
+</g>
+<g >
+<title>TLeafI::GetValue (45,323,816 samples, 0.03%)</title><rect x="1339.2" y="581" width="0.5" height="15.0" fill="rgb(179,179,51)" rx="2" ry="2" />
+<text  x="1342.24" y="591.5" ></text>
+</g>
+<g >
+<title>TBranch::GetEntry (3,940,230,942 samples, 2.94%)</title><rect x="1368.3" y="613" width="43.5" height="15.0" fill="rgb(184,184,53)" rx="2" ry="2" />
+<text  x="1371.29" y="623.5" >TBra..</text>
+</g>
+<g >
+<title>__do_munmap (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="325" width="3.5" height="15.0" fill="rgb(248,120,120)" rx="2" ry="2" />
+<text  x="1454.32" y="335.5" ></text>
+</g>
+<g >
+<title>TROOT::LoadClass (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="565" width="0.5" height="15.0" fill="rgb(183,183,53)" rx="2" ry="2" />
+<text  x="1487.76" y="575.5" ></text>
+</g>
+<g >
+<title>TMath::BinarySearch&lt;long long&gt; (45,306,497 samples, 0.03%)</title><rect x="525.7" y="421" width="0.5" height="15.0" fill="rgb(188,188,55)" rx="2" ry="2" />
+<text  x="528.73" y="431.5" ></text>
+</g>
+<g >
+<title>_start (156,289,145 samples, 0.12%)</title><rect x="1488.3" y="805" width="1.7" height="15.0" fill="rgb(222,83,83)" rx="2" ry="2" />
+<text  x="1491.28" y="815.5" ></text>
+</g>
+<g >
+<title>ROOT::VecOps::Construct&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PxPyPzE4D&lt;double&gt; &gt;, ROOT::Math::LorentzVector&lt;ROOT::Math::PtEtaPhiM4D&lt;double&gt; &gt; &gt; (18,981,837,029 samples, 14.15%)</title><rect x="613.7" y="549" width="209.5" height="15.0" fill="rgb(180,180,51)" rx="2" ry="2" />
+<text  x="616.70" y="559.5" >ROOT::VecOps::Construct&lt;ROO..</text>
+</g>
+<g >
+<title>yyparse (149,051,456 samples, 0.11%)</title><rect x="1488.4" y="693" width="1.6" height="15.0" fill="rgb(233,98,98)" rx="2" ry="2" />
+<text  x="1491.36" y="703.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadArray (90,650,393 samples, 0.07%)</title><rect x="1334.7" y="533" width="1.0" height="15.0" fill="rgb(190,190,55)" rx="2" ry="2" />
+<text  x="1337.74" y="543.5" ></text>
+</g>
+<g >
+<title>inflate (32,727,976,631 samples, 24.40%)</title><rect x="147.6" y="437" width="361.1" height="15.0" fill="rgb(224,85,85)" rx="2" ry="2" />
+<text  x="150.59" y="447.5" >inflate</text>
+</g>
+<g >
+<title>TTreeCache::ReadBufferNormal (1,539,772,417 samples, 1.15%)</title><rect x="1393.8" y="549" width="17.0" height="15.0" fill="rgb(178,178,51)" rx="2" ry="2" />
+<text  x="1396.78" y="559.5" ></text>
+</g>
+<g >
+<title>clang::ItaniumVTableContext::computeVTableRelatedInformation (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="69" width="0.5" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="1489.25" y="79.5" ></text>
+</g>
+<g >
+<title>_dl_open (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="405" width="0.5" height="15.0" fill="rgb(230,94,94)" rx="2" ry="2" />
+<text  x="1487.76" y="415.5" ></text>
+</g>
+<g >
+<title>sh (156,289,145 samples, 0.12%)</title><rect x="1488.3" y="821" width="1.7" height="15.0" fill="rgb(239,107,107)" rx="2" ry="2" />
+<text  x="1491.28" y="831.5" ></text>
+</g>
+<g >
+<title>get_page_from_freelist (226,547,579 samples, 0.17%)</title><rect x="518.2" y="309" width="2.5" height="15.0" fill="rgb(200,50,50)" rx="2" ry="2" />
+<text  x="521.23" y="319.5" ></text>
+</g>
+<g >
+<title>TUrl::SetUrl (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="661" width="25.5" height="15.0" fill="rgb(187,187,54)" rx="2" ry="2" />
+<text  x="1462.31" y="671.5" >T..</text>
+</g>
+<g >
+<title>TClass::LoadClassDefault (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="581" width="0.5" height="15.0" fill="rgb(211,211,63)" rx="2" ry="2" />
+<text  x="1488.25" y="591.5" ></text>
+</g>
+<g >
+<title>TList::Delete (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="581" width="4.0" height="15.0" fill="rgb(181,181,52)" rx="2" ry="2" />
+<text  x="1454.32" y="591.5" ></text>
+</g>
+<g >
+<title>TPluginManager::LoadHandlerMacros (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="661" width="0.5" height="15.0" fill="rgb(217,217,65)" rx="2" ry="2" />
+<text  x="1489.75" y="671.5" ></text>
+</g>
+<g >
+<title>TCling::DeepAutoLoadImpl (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="437" width="0.5" height="15.0" fill="rgb(202,202,59)" rx="2" ry="2" />
+<text  x="1488.75" y="447.5" ></text>
+</g>
+<g >
+<title>__cosh (1,403,734,251 samples, 1.05%)</title><rect x="1098.4" y="597" width="15.5" height="15.0" fill="rgb(202,52,52)" rx="2" ry="2" />
+<text  x="1101.36" y="607.5" ></text>
+</g>
+<g >
+<title>TBranch::ReadLeaves1Impl (181,057,307 samples, 0.13%)</title><rect x="1339.7" y="597" width="2.0" height="15.0" fill="rgb(206,206,61)" rx="2" ry="2" />
+<text  x="1342.74" y="607.5" ></text>
+</g>
+<g >
+<title>dl_open_worker_begin (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="421" width="25.5" height="15.0" fill="rgb(252,126,126)" rx="2" ry="2" />
+<text  x="1462.31" y="431.5" >d..</text>
+</g>
+<g >
+<title>rdataframe (133,623,506,332 samples, 99.63%)</title><rect x="12.7" y="741" width="1474.6" height="15.0" fill="rgb(232,97,97)" rx="2" ry="2" />
+<text  x="15.73" y="751.5" >rdataframe</text>
+</g>
+<g >
+<title>TPad::Paint (90,454,068 samples, 0.07%)</title><rect x="1485.3" y="693" width="1.0" height="15.0" fill="rgb(189,189,55)" rx="2" ry="2" />
+<text  x="1488.25" y="703.5" ></text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (133,623,506,332 samples, 99.63%)</title><rect x="12.7" y="789" width="1474.6" height="15.0" fill="rgb(218,76,76)" rx="2" ry="2" />
+<text  x="15.73" y="799.5" >__libc_start_main@@GLIBC_2.34</text>
+</g>
+<g >
+<title>TVirtualHistPainter::HistPainter (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="629" width="0.5" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="1488.25" y="639.5" ></text>
+</g>
+<g >
+<title>systrim.constprop.0 (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="389" width="0.5" height="15.0" fill="rgb(201,52,52)" rx="2" ry="2" />
+<text  x="1457.81" y="399.5" ></text>
+</g>
+<g >
+<title>exit_mmap (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="709" width="1.0" height="15.0" fill="rgb(253,127,127)" rx="2" ry="2" />
+<text  x="1490.28" y="719.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitStmt (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="261" width="0.5" height="15.0" fill="rgb(205,205,61)" rx="2" ry="2" />
+<text  x="1489.25" y="271.5" ></text>
+</g>
+<g >
+<title>trijet_pt (45,287,569 samples, 0.03%)</title><rect x="1353.2" y="645" width="0.5" height="15.0" fill="rgb(206,59,59)" rx="2" ry="2" />
+<text  x="1356.23" y="655.5" ></text>
+</g>
+<g >
+<title>clang::ASTContext::getASTRecordLayout (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="421" width="0.5" height="15.0" fill="rgb(181,181,52)" rx="2" ry="2" />
+<text  x="1488.25" y="431.5" ></text>
+</g>
+<g >
+<title>__cosh_finite@GLIBC_2.15 (90,411,422 samples, 0.07%)</title><rect x="1101.4" y="581" width="1.0" height="15.0" fill="rgb(249,121,121)" rx="2" ry="2" />
+<text  x="1104.36" y="591.5" ></text>
+</g>
+<g >
+<title>R__unzip (6,566,121,696 samples, 4.90%)</title><rect x="1259.3" y="533" width="72.4" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="1262.29" y="543.5" >R__unzip</text>
+</g>
+<g >
+<title>rdf (133,894,569,530 samples, 99.83%)</title><rect x="10.8" y="821" width="1477.5" height="15.0" fill="rgb(210,65,65)" rx="2" ry="2" />
+<text  x="13.76" y="831.5" >rdf</text>
+</g>
+<g >
+<title>llvm::orc::SimpleCompiler::operator (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="197" width="0.5" height="15.0" fill="rgb(220,220,66)" rx="2" ry="2" />
+<text  x="1489.75" y="207.5" ></text>
+</g>
+<g >
+<title>free_pcppages_bulk (90,577,772 samples, 0.07%)</title><rect x="1453.8" y="213" width="1.0" height="15.0" fill="rgb(231,96,96)" rx="2" ry="2" />
+<text  x="1456.81" y="223.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (90,577,376 samples, 0.07%)</title><rect x="524.2" y="437" width="1.0" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="527.23" y="447.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;rdataframe (11,412,705,931 samples, 8.51%)</title><rect x="1225.3" y="645" width="125.9" height="15.0" fill="rgb(185,185,53)" rx="2" ry="2" />
+<text  x="1228.29" y="655.5" >ROOT::Detail::R..</text>
+</g>
+<g >
+<title>llvm::PMDataManager::removeNotPreservedAnalysis (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="85" width="0.5" height="15.0" fill="rgb(192,192,56)" rx="2" ry="2" />
+<text  x="1489.75" y="95.5" ></text>
+</g>
+<g >
+<title>try_charge_memcg (45,306,459 samples, 0.03%)</title><rect x="509.2" y="261" width="0.5" height="15.0" fill="rgb(226,87,87)" rx="2" ry="2" />
+<text  x="512.24" y="271.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::GetDecl (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="229" width="0.5" height="15.0" fill="rgb(192,192,56)" rx="2" ry="2" />
+<text  x="1488.25" y="239.5" ></text>
+</g>
+<g >
+<title>page_remove_rmap (45,156,064 samples, 0.03%)</title><rect x="1487.8" y="661" width="0.5" height="15.0" fill="rgb(230,93,93)" rx="2" ry="2" />
+<text  x="1490.78" y="671.5" ></text>
+</g>
+<g >
+<title>get_page_from_freelist (135,905,120 samples, 0.10%)</title><rect x="537.7" y="293" width="1.5" height="15.0" fill="rgb(204,57,57)" rx="2" ry="2" />
+<text  x="540.72" y="303.5" ></text>
+</g>
+<g >
+<title>TEnum::GetEnum (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="469" width="0.5" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="1488.75" y="479.5" ></text>
+</g>
+<g >
+<title>__default_morecore@GLIBC_2.2.5 (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="373" width="0.5" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="1457.81" y="383.5" ></text>
+</g>
+<g >
+<title>_dl_start_user (61,804,087 samples, 0.05%)</title><rect x="10.0" y="805" width="0.7" height="15.0" fill="rgb(251,125,125)" rx="2" ry="2" />
+<text  x="13.00" y="815.5" ></text>
+</g>
+<g >
+<title>inflate (1,132,343,806 samples, 0.84%)</title><rect x="1381.3" y="533" width="12.5" height="15.0" fill="rgb(204,57,57)" rx="2" ry="2" />
+<text  x="1384.29" y="543.5" ></text>
+</g>
+<g >
+<title>TBuffer::Expand (1,177,735,961 samples, 0.88%)</title><rect x="508.7" y="453" width="13.0" height="15.0" fill="rgb(193,193,56)" rx="2" ry="2" />
+<text  x="511.74" y="463.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenModule::EmitGlobalFunctionDefinition (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="405" width="0.5" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="1489.25" y="415.5" ></text>
+</g>
+<g >
+<title>_dlerror_run (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="469" width="0.5" height="15.0" fill="rgb(236,103,103)" rx="2" ry="2" />
+<text  x="1487.76" y="479.5" ></text>
+</g>
+<g >
+<title>dl_open_worker (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="453" width="25.5" height="15.0" fill="rgb(220,80,80)" rx="2" ry="2" />
+<text  x="1462.31" y="463.5" >d..</text>
+</g>
+<g >
+<title>filemap_get_read_batch (135,841,620 samples, 0.10%)</title><rect x="1407.8" y="341" width="1.5" height="15.0" fill="rgb(250,123,123)" rx="2" ry="2" />
+<text  x="1410.77" y="351.5" ></text>
+</g>
+<g >
+<title>all (134,119,853,791 samples, 100%)</title><rect x="10.0" y="837" width="1480.0" height="15.0" fill="rgb(237,104,104)" rx="2" ry="2" />
+<text  x="13.00" y="847.5" ></text>
+</g>
+<g >
+<title>TLeafF::ReadBasket (317,077,501 samples, 0.24%)</title><rect x="567.7" y="517" width="3.5" height="15.0" fill="rgb(199,199,58)" rx="2" ry="2" />
+<text  x="570.70" y="527.5" ></text>
+</g>
+<g >
+<title>TClass::IsForeign (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="549" width="0.5" height="15.0" fill="rgb(223,223,67)" rx="2" ry="2" />
+<text  x="1488.25" y="559.5" ></text>
+</g>
+<g >
+<title>TH1::GetPainter (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="645" width="0.5" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="1488.25" y="655.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (45,332,115 samples, 0.03%)</title><rect x="16.2" y="677" width="0.5" height="15.0" fill="rgb(205,58,58)" rx="2" ry="2" />
+<text  x="19.23" y="687.5" ></text>
+</g>
+<g >
+<title>atan2@plt (135,849,068 samples, 0.10%)</title><rect x="1223.3" y="613" width="1.5" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="1226.29" y="623.5" ></text>
+</g>
+<g >
+<title>THistPainter::Paint (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="661" width="0.5" height="15.0" fill="rgb(195,195,57)" rx="2" ry="2" />
+<text  x="1488.75" y="671.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RTreeColumnReader&lt;ROOT::VecOps::RVec&lt;float&gt; &gt;::GetImpl (407,693,214 samples, 0.30%)</title><rect x="1031.3" y="629" width="4.5" height="15.0" fill="rgb(180,180,51)" rx="2" ry="2" />
+<text  x="1034.27" y="639.5" ></text>
+</g>
+<g >
+<title>rmqueue_bulk (90,635,510 samples, 0.07%)</title><rect x="519.7" y="293" width="1.0" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="522.73" y="303.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RDefineReader::GetImpl (45,332,644 samples, 0.03%)</title><rect x="1030.8" y="613" width="0.5" height="15.0" fill="rgb(188,188,54)" rx="2" ry="2" />
+<text  x="1033.77" y="623.5" ></text>
+</g>
+<g >
+<title>clang::MultiplexExternalSemaSource::GetExternalCXXBaseSpecifiers (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="373" width="0.5" height="15.0" fill="rgb(186,186,54)" rx="2" ry="2" />
+<text  x="1488.25" y="383.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::Run (131,091,288,112 samples, 97.74%)</title><rect x="12.7" y="725" width="1446.6" height="15.0" fill="rgb(177,177,50)" rx="2" ry="2" />
+<text  x="15.73" y="735.5" >ROOT::Detail::RDF::RLoopManager::Run</text>
+</g>
+<g >
+<title>clang::CXXRecordDecl::getFinalOverriders (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="53" width="0.5" height="15.0" fill="rgb(213,213,64)" rx="2" ry="2" />
+<text  x="1489.25" y="63.5" ></text>
+</g>
+<g >
+<title>__strcmp_evex (45,332,115 samples, 0.03%)</title><rect x="16.2" y="661" width="0.5" height="15.0" fill="rgb(236,103,103)" rx="2" ry="2" />
+<text  x="19.23" y="671.5" ></text>
+</g>
+<g >
+<title>adler32_z (2,853,006,070 samples, 2.13%)</title><rect x="154.6" y="421" width="31.5" height="15.0" fill="rgb(226,88,88)" rx="2" ry="2" />
+<text  x="157.58" y="431.5" >ad..</text>
+</g>
+<g >
+<title>_int_free (45,159,754 samples, 0.03%)</title><rect x="90.7" y="517" width="0.5" height="15.0" fill="rgb(224,84,84)" rx="2" ry="2" />
+<text  x="93.68" y="527.5" ></text>
+</g>
+<g >
+<title>unmap_vmas (271,470,671 samples, 0.20%)</title><rect x="1451.8" y="293" width="3.0" height="15.0" fill="rgb(246,118,118)" rx="2" ry="2" />
+<text  x="1454.82" y="303.5" ></text>
+</g>
+<g >
+<title>dlopen_doit (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="501" width="25.5" height="15.0" fill="rgb(226,88,88)" rx="2" ry="2" />
+<text  x="1462.31" y="511.5" >d..</text>
+</g>
+<g >
+<title>_dl_start (84,398,257 samples, 0.06%)</title><rect x="11.8" y="789" width="0.9" height="15.0" fill="rgb(222,82,82)" rx="2" ry="2" />
+<text  x="14.80" y="799.5" ></text>
+</g>
+<g >
+<title>__cosh_finite@GLIBC_2.15 (181,220,066 samples, 0.14%)</title><rect x="642.2" y="517" width="2.0" height="15.0" fill="rgb(220,80,80)" rx="2" ry="2" />
+<text  x="645.24" y="527.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::GetAddress@plt (45,171,545 samples, 0.03%)</title><rect x="593.7" y="533" width="0.5" height="15.0" fill="rgb(195,195,57)" rx="2" ry="2" />
+<text  x="596.70" y="543.5" ></text>
+</g>
+<g >
+<title>do_exit (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="741" width="1.0" height="15.0" fill="rgb(206,58,58)" rx="2" ry="2" />
+<text  x="1490.28" y="751.5" ></text>
+</g>
+<g >
+<title>inflate_table (1,539,183,242 samples, 1.15%)</title><rect x="491.8" y="421" width="16.9" height="15.0" fill="rgb(254,128,128)" rx="2" ry="2" />
+<text  x="494.75" y="431.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RTreeColumnReader&lt;ROOT::VecOps::RVec&lt;float&gt; &gt;::GetImpl (181,282,304 samples, 0.14%)</title><rect x="1351.2" y="645" width="2.0" height="15.0" fill="rgb(219,219,66)" rx="2" ry="2" />
+<text  x="1354.23" y="655.5" ></text>
+</g>
+<g >
+<title>llvm::RuntimeDyldImpl::resolveRelocations (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="309" width="0.5" height="15.0" fill="rgb(220,220,66)" rx="2" ry="2" />
+<text  x="1489.75" y="319.5" ></text>
+</g>
+<g >
+<title>TClingCallFunc::make_wrapper (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="629" width="0.5" height="15.0" fill="rgb(213,213,63)" rx="2" ry="2" />
+<text  x="1489.25" y="639.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;llvm::Expected&lt;unsigned long&gt;  (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="357" width="0.5" height="15.0" fill="rgb(223,223,67)" rx="2" ry="2" />
+<text  x="1489.75" y="367.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;rdataframe (69,864,376,612 samples, 52.09%)</title><rect x="66.2" y="581" width="771.0" height="15.0" fill="rgb(197,197,58)" rx="2" ry="2" />
+<text  x="69.21" y="591.5" >ROOT::Detail::RDF::RDefine&lt;rdataframe</text>
+</g>
+<g >
+<title>check_preemption_disabled (45,306,459 samples, 0.03%)</title><rect x="509.2" y="245" width="0.5" height="15.0" fill="rgb(241,110,110)" rx="2" ry="2" />
+<text  x="512.24" y="255.5" ></text>
+</g>
+<g >
+<title>__mem_cgroup_charge (135,905,565 samples, 0.10%)</title><rect x="516.2" y="341" width="1.5" height="15.0" fill="rgb(238,105,105)" rx="2" ry="2" />
+<text  x="519.23" y="351.5" ></text>
+</g>
+<g >
+<title>__expm1 (135,740,792 samples, 0.10%)</title><rect x="644.2" y="517" width="1.5" height="15.0" fill="rgb(230,95,95)" rx="2" ry="2" />
+<text  x="647.24" y="527.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::GetAddress (5,305,111,752 samples, 3.96%)</title><rect x="1358.2" y="645" width="58.6" height="15.0" fill="rgb(229,229,69)" rx="2" ry="2" />
+<text  x="1361.23" y="655.5" >ROOT::..</text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RFilter&lt;rdataframe (226,467,171 samples, 0.17%)</title><rect x="13.7" y="693" width="2.5" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="16.73" y="703.5" ></text>
+</g>
+<g >
+<title>inflate_fast (27,701,951,299 samples, 20.65%)</title><rect x="186.1" y="421" width="305.7" height="15.0" fill="rgb(242,112,112)" rx="2" ry="2" />
+<text  x="189.06" y="431.5" >inflate_fast</text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;rdataframe (90,647,098 samples, 0.07%)</title><rect x="60.2" y="597" width="1.0" height="15.0" fill="rgb(212,212,63)" rx="2" ry="2" />
+<text  x="63.21" y="607.5" ></text>
+</g>
+<g >
+<title>TCling::AutoLoad (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="453" width="0.5" height="15.0" fill="rgb(178,178,51)" rx="2" ry="2" />
+<text  x="1488.75" y="463.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="437" width="25.5" height="15.0" fill="rgb(232,96,96)" rx="2" ry="2" />
+<text  x="1462.31" y="447.5" >_..</text>
+</g>
+<g >
+<title>do_user_addr_fault (45,325,267 samples, 0.03%)</title><rect x="524.7" y="405" width="0.5" height="15.0" fill="rgb(226,88,88)" rx="2" ry="2" />
+<text  x="527.73" y="415.5" ></text>
+</g>
+<g >
+<title>error_entry (45,314,022 samples, 0.03%)</title><rect x="1334.2" y="501" width="0.5" height="15.0" fill="rgb(213,69,69)" rx="2" ry="2" />
+<text  x="1337.24" y="511.5" ></text>
+</g>
+<g >
+<title>TCling::ShallowAutoLoadImpl (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="581" width="0.5" height="15.0" fill="rgb(208,208,62)" rx="2" ry="2" />
+<text  x="1487.76" y="591.5" ></text>
+</g>
+<g >
+<title>TKey::ReadObj (90,592,320 samples, 0.07%)</title><rect x="1450.3" y="645" width="1.0" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1453.32" y="655.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::ReadCXXBaseSpecifier (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="341" width="0.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1488.25" y="351.5" ></text>
+</g>
+<g >
+<title>ksys_read (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="421" width="15.5" height="15.0" fill="rgb(247,118,118)" rx="2" ry="2" />
+<text  x="1396.78" y="431.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (90,644,928 samples, 0.07%)</title><rect x="837.2" y="597" width="1.0" height="15.0" fill="rgb(200,51,51)" rx="2" ry="2" />
+<text  x="840.16" y="607.5" ></text>
+</g>
+<g >
+<title>__ieee754_atan2_fma (1,449,142,505 samples, 1.08%)</title><rect x="1082.4" y="581" width="16.0" height="15.0" fill="rgb(208,61,61)" rx="2" ry="2" />
+<text  x="1085.37" y="591.5" ></text>
+</g>
+<g >
+<title>TSystem::Load (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="389" width="0.5" height="15.0" fill="rgb(177,177,50)" rx="2" ry="2" />
+<text  x="1488.75" y="399.5" ></text>
+</g>
+<g >
+<title>TLeafI::GetMaximum (45,327,593 samples, 0.03%)</title><rect x="1350.7" y="613" width="0.5" height="15.0" fill="rgb(197,197,58)" rx="2" ry="2" />
+<text  x="1353.73" y="623.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RTreeColumnReader&lt;unsigned int&gt;::GetImpl (97,297,037 samples, 0.07%)</title><rect x="1421.3" y="677" width="1.0" height="15.0" fill="rgb(183,183,53)" rx="2" ry="2" />
+<text  x="1424.27" y="687.5" ></text>
+</g>
+<g >
+<title>_dl_start (61,804,087 samples, 0.05%)</title><rect x="10.0" y="789" width="0.7" height="15.0" fill="rgb(201,51,51)" rx="2" ry="2" />
+<text  x="13.00" y="799.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;rdataframe (45,282,742 samples, 0.03%)</title><rect x="47.2" y="661" width="0.5" height="15.0" fill="rgb(211,211,63)" rx="2" ry="2" />
+<text  x="50.22" y="671.5" ></text>
+</g>
+<g >
+<title>unmap_page_range (271,470,671 samples, 0.20%)</title><rect x="1451.8" y="277" width="3.0" height="15.0" fill="rgb(218,77,77)" rx="2" ry="2" />
+<text  x="1454.82" y="287.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (45,225,288 samples, 0.03%)</title><rect x="541.7" y="357" width="0.5" height="15.0" fill="rgb(230,94,94)" rx="2" ry="2" />
+<text  x="544.72" y="367.5" ></text>
+</g>
+<g >
+<title>TBasket::ReadBasketBuffers (35,490,562,183 samples, 26.46%)</title><rect x="147.6" y="469" width="391.6" height="15.0" fill="rgb(229,229,69)" rx="2" ry="2" />
+<text  x="150.59" y="479.5" >TBasket::ReadBasketBuffers</text>
+</g>
+<g >
+<title>do_syscall_64 (61,804,087 samples, 0.05%)</title><rect x="10.0" y="645" width="0.7" height="15.0" fill="rgb(251,125,125)" rx="2" ry="2" />
+<text  x="13.00" y="655.5" ></text>
+</g>
+<g >
+<title>_dl_lookup_symbol_x (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="309" width="0.5" height="15.0" fill="rgb(218,76,76)" rx="2" ry="2" />
+<text  x="1487.76" y="319.5" ></text>
+</g>
+<g >
+<title>TChain::ParseTreeFilename (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="693" width="25.5" height="15.0" fill="rgb(175,175,50)" rx="2" ry="2" />
+<text  x="1462.31" y="703.5" >T..</text>
+</g>
+<g >
+<title>__memset_evex_unaligned_erms (271,698,600 samples, 0.20%)</title><rect x="1331.7" y="517" width="3.0" height="15.0" fill="rgb(254,129,129)" rx="2" ry="2" />
+<text  x="1334.75" y="527.5" ></text>
+</g>
+<g >
+<title>parse_and_execute (156,289,145 samples, 0.12%)</title><rect x="1488.3" y="725" width="1.7" height="15.0" fill="rgb(253,127,127)" rx="2" ry="2" />
+<text  x="1491.28" y="735.5" ></text>
+</g>
+<g >
+<title>release_pages (45,328,307 samples, 0.03%)</title><rect x="520.7" y="309" width="0.5" height="15.0" fill="rgb(207,60,60)" rx="2" ry="2" />
+<text  x="523.73" y="319.5" ></text>
+</g>
+<g >
+<title>inflate_fast (5,751,815,563 samples, 4.29%)</title><rect x="1266.3" y="501" width="63.4" height="15.0" fill="rgb(200,50,50)" rx="2" ry="2" />
+<text  x="1269.28" y="511.5" >inflat..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="373" width="3.5" height="15.0" fill="rgb(229,92,92)" rx="2" ry="2" />
+<text  x="1454.32" y="383.5" ></text>
+</g>
+<g >
+<title>TTree::~TTree (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="565" width="4.0" height="15.0" fill="rgb(191,191,56)" rx="2" ry="2" />
+<text  x="1454.32" y="575.5" ></text>
+</g>
+<g >
+<title>_dlerror_run (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="549" width="25.5" height="15.0" fill="rgb(227,90,90)" rx="2" ry="2" />
+<text  x="1462.31" y="559.5" >_..</text>
+</g>
+<g >
+<title>mmap64 (61,804,087 samples, 0.05%)</title><rect x="10.0" y="677" width="0.7" height="15.0" fill="rgb(239,107,107)" rx="2" ry="2" />
+<text  x="13.00" y="687.5" ></text>
+</g>
+<g >
+<title>_dl_relocate_object (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="325" width="0.5" height="15.0" fill="rgb(227,89,89)" rx="2" ry="2" />
+<text  x="1487.76" y="335.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::RunAndCheckFilters (128,419,507,707 samples, 95.75%)</title><rect x="16.7" y="693" width="1417.1" height="15.0" fill="rgb(175,175,50)" rx="2" ry="2" />
+<text  x="19.73" y="703.5" >ROOT::Detail::RDF::RLoopManager::RunAndCheckFilters</text>
+</g>
+<g >
+<title>handle_mm_fault (45,299,009 samples, 0.03%)</title><rect x="540.2" y="373" width="0.5" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="543.22" y="383.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (226,384,578 samples, 0.17%)</title><rect x="1331.7" y="501" width="2.5" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="1334.75" y="511.5" ></text>
+</g>
+<g >
+<title>TClass::LoadClassDefault (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="629" width="0.5" height="15.0" fill="rgb(180,180,52)" rx="2" ry="2" />
+<text  x="1487.76" y="639.5" ></text>
+</g>
+<g >
+<title>ROOT::VecOps::Construct&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PtEtaPhiM4D&lt;double&gt; &gt;, float, float, float, float&gt; (1,585,284,866 samples, 1.18%)</title><rect x="596.2" y="549" width="17.5" height="15.0" fill="rgb(217,217,65)" rx="2" ry="2" />
+<text  x="599.20" y="559.5" ></text>
+</g>
+<g >
+<title>TLeafI::ReadBasket (90,642,589 samples, 0.07%)</title><rect x="1410.8" y="597" width="1.0" height="15.0" fill="rgb(198,198,58)" rx="2" ry="2" />
+<text  x="1413.77" y="607.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (45,299,009 samples, 0.03%)</title><rect x="540.2" y="405" width="0.5" height="15.0" fill="rgb(222,82,82)" rx="2" ry="2" />
+<text  x="543.22" y="415.5" ></text>
+</g>
+<g >
+<title>parse_command (149,051,456 samples, 0.11%)</title><rect x="1488.4" y="709" width="1.6" height="15.0" fill="rgb(248,120,120)" rx="2" ry="2" />
+<text  x="1491.36" y="719.5" ></text>
+</g>
+<g >
+<title>tlb_finish_mmu (45,313,364 samples, 0.03%)</title><rect x="1451.3" y="293" width="0.5" height="15.0" fill="rgb(225,87,87)" rx="2" ry="2" />
+<text  x="1454.32" y="303.5" ></text>
+</g>
+<g >
+<title>TLeafI::GetMaximum (90,661,547 samples, 0.07%)</title><rect x="595.2" y="533" width="1.0" height="15.0" fill="rgb(219,219,66)" rx="2" ry="2" />
+<text  x="598.20" y="543.5" ></text>
+</g>
+<g >
+<title>_int_free (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="405" width="0.5" height="15.0" fill="rgb(211,66,66)" rx="2" ry="2" />
+<text  x="1457.81" y="415.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RDefineReader::GetImpl (70,090,740,237 samples, 52.26%)</title><rect x="63.7" y="597" width="773.5" height="15.0" fill="rgb(185,185,53)" rx="2" ry="2" />
+<text  x="66.71" y="607.5" >ROOT::Internal::RDF::RDefineReader::GetImpl</text>
+</g>
+<g >
+<title>TTreeCache::ReadBufferNormal (1,267,681,403 samples, 0.95%)</title><rect x="525.2" y="453" width="14.0" height="15.0" fill="rgb(204,204,60)" rx="2" ry="2" />
+<text  x="528.23" y="463.5" ></text>
+</g>
+<g >
+<title>ksys_mmap_pgoff (61,804,087 samples, 0.05%)</title><rect x="10.0" y="629" width="0.7" height="15.0" fill="rgb(243,113,113)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" ></text>
+</g>
+<g >
+<title>__sincos_fma (4,393,003,553 samples, 3.28%)</title><rect x="657.7" y="533" width="48.5" height="15.0" fill="rgb(200,50,50)" rx="2" ry="2" />
+<text  x="660.73" y="543.5" >__si..</text>
+</g>
+<g >
+<title>preempt_count_add (45,283,405 samples, 0.03%)</title><rect x="1336.7" y="389" width="0.5" height="15.0" fill="rgb(250,123,123)" rx="2" ry="2" />
+<text  x="1339.74" y="399.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::finishPendingActions (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="261" width="0.5" height="15.0" fill="rgb(208,208,62)" rx="2" ry="2" />
+<text  x="1488.25" y="271.5" ></text>
+</g>
+<g >
+<title>[vmlinux] (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="773" width="1.0" height="15.0" fill="rgb(242,112,112)" rx="2" ry="2" />
+<text  x="1490.28" y="783.5" ></text>
+</g>
+<g >
+<title>TCling::Load (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="533" width="0.5" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="1487.76" y="543.5" ></text>
+</g>
+<g >
+<title>operator new (90,606,979 samples, 0.07%)</title><rect x="508.7" y="421" width="1.0" height="15.0" fill="rgb(215,72,72)" rx="2" ry="2" />
+<text  x="511.74" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (45,230,447 samples, 0.03%)</title><rect x="11.3" y="789" width="0.5" height="15.0" fill="rgb(241,110,110)" rx="2" ry="2" />
+<text  x="14.26" y="799.5" ></text>
+</g>
+<g >
+<title>llvm::PMDataManager::add (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="101" width="0.5" height="15.0" fill="rgb(203,203,60)" rx="2" ry="2" />
+<text  x="1489.75" y="111.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (45,333,633 samples, 0.03%)</title><rect x="539.2" y="373" width="0.5" height="15.0" fill="rgb(223,84,84)" rx="2" ry="2" />
+<text  x="542.22" y="383.5" ></text>
+</g>
+<g >
+<title>TClass::GetDataMember (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="565" width="0.5" height="15.0" fill="rgb(185,185,53)" rx="2" ry="2" />
+<text  x="1488.75" y="575.5" ></text>
+</g>
+<g >
+<title>TClingCallFunc::IFacePtr (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="645" width="0.5" height="15.0" fill="rgb(198,198,58)" rx="2" ry="2" />
+<text  x="1489.25" y="655.5" ></text>
+</g>
+<g >
+<title>unmap_region (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="277" width="0.5" height="15.0" fill="rgb(242,111,111)" rx="2" ry="2" />
+<text  x="1457.81" y="287.5" ></text>
+</g>
+<g >
+<title>cosh@plt (45,320,226 samples, 0.03%)</title><rect x="1224.8" y="613" width="0.5" height="15.0" fill="rgb(200,50,50)" rx="2" ry="2" />
+<text  x="1227.79" y="623.5" ></text>
+</g>
+<g >
+<title>__rcu_read_lock (45,319,110 samples, 0.03%)</title><rect x="1453.3" y="197" width="0.5" height="15.0" fill="rgb(213,69,69)" rx="2" ry="2" />
+<text  x="1456.31" y="207.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;std::function&lt;ROOT::VecOps::RVec&lt;unsigned long&gt;  (88,361,513,043 samples, 65.88%)</title><rect x="55.7" y="613" width="975.1" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="58.71" y="623.5" >ROOT::Detail::RDF::RDefine&lt;std::function&lt;ROOT::VecOps::RVec&lt;unsigned long&gt; </text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitCompoundStmtWithoutScope (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="357" width="0.5" height="15.0" fill="rgb(197,197,58)" rx="2" ry="2" />
+<text  x="1489.25" y="367.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitLValue (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="229" width="0.5" height="15.0" fill="rgb(224,224,68)" rx="2" ry="2" />
+<text  x="1489.25" y="239.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (45,283,405 samples, 0.03%)</title><rect x="1336.7" y="485" width="0.5" height="15.0" fill="rgb(244,115,115)" rx="2" ry="2" />
+<text  x="1339.74" y="495.5" ></text>
+</g>
+<g >
+<title>strcmp (84,245,949 samples, 0.06%)</title><rect x="11.8" y="677" width="0.9" height="15.0" fill="rgb(246,117,117)" rx="2" ry="2" />
+<text  x="14.80" y="687.5" ></text>
+</g>
+<g >
+<title>main (133,623,506,332 samples, 99.63%)</title><rect x="12.7" y="757" width="1474.6" height="15.0" fill="rgb(242,112,112)" rx="2" ry="2" />
+<text  x="15.73" y="767.5" >main</text>
+</g>
+<g >
+<title>rmqueue_bulk (90,609,392 samples, 0.07%)</title><rect x="538.2" y="277" width="1.0" height="15.0" fill="rgb(217,75,75)" rx="2" ry="2" />
+<text  x="541.22" y="287.5" ></text>
+</g>
+<g >
+<title>clang::ASTDeclReader::VisitClassTemplateDecl (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="181" width="0.5" height="15.0" fill="rgb(188,188,54)" rx="2" ry="2" />
+<text  x="1488.25" y="191.5" ></text>
+</g>
+<g >
+<title>cling::DeclCollector::HandleTopLevelDecl (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="501" width="0.5" height="15.0" fill="rgb(209,209,62)" rx="2" ry="2" />
+<text  x="1489.25" y="511.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitCompoundStmtWithoutScope (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="277" width="0.5" height="15.0" fill="rgb(209,209,62)" rx="2" ry="2" />
+<text  x="1489.25" y="287.5" ></text>
+</g>
+<g >
+<title>clang::ASTDeclReader::VisitNamedDecl (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="133" width="0.5" height="15.0" fill="rgb(216,216,65)" rx="2" ry="2" />
+<text  x="1488.25" y="143.5" ></text>
+</g>
+<g >
+<title>TMethodCall::Execute (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="677" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1489.25" y="687.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (45,325,267 samples, 0.03%)</title><rect x="524.7" y="389" width="0.5" height="15.0" fill="rgb(232,97,97)" rx="2" ry="2" />
+<text  x="527.73" y="399.5" ></text>
+</g>
+<g >
+<title>TCling::GetSharedLibDeps (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="373" width="0.5" height="15.0" fill="rgb(184,184,53)" rx="2" ry="2" />
+<text  x="1488.75" y="383.5" ></text>
+</g>
+<g >
+<title>unmap_vmas (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="693" width="1.0" height="15.0" fill="rgb(232,97,97)" rx="2" ry="2" />
+<text  x="1490.28" y="703.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::CleanUpTask (45,332,115 samples, 0.03%)</title><rect x="16.2" y="693" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="19.23" y="703.5" ></text>
+</g>
+<g >
+<title>__ieee754_exp_fma (724,694,361 samples, 0.54%)</title><rect x="645.7" y="517" width="8.0" height="15.0" fill="rgb(210,65,65)" rx="2" ry="2" />
+<text  x="648.74" y="527.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="437" width="0.5" height="15.0" fill="rgb(253,127,127)" rx="2" ry="2" />
+<text  x="1487.76" y="447.5" ></text>
+</g>
+<g >
+<title>read (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="469" width="15.5" height="15.0" fill="rgb(224,85,85)" rx="2" ry="2" />
+<text  x="1396.78" y="479.5" ></text>
+</g>
+<g >
+<title>TCling::ProcessLineSynch (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="597" width="0.5" height="15.0" fill="rgb(185,185,53)" rx="2" ry="2" />
+<text  x="1489.75" y="607.5" ></text>
+</g>
+<g >
+<title>TLeafF::ReadBasket (135,658,975 samples, 0.10%)</title><rect x="1345.2" y="597" width="1.5" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="1348.23" y="607.5" ></text>
+</g>
+<g >
+<title>TBranch::GetFreshBasket (271,841,001 samples, 0.20%)</title><rect x="539.2" y="469" width="3.0" height="15.0" fill="rgb(188,188,54)" rx="2" ry="2" />
+<text  x="542.22" y="479.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="517" width="25.5" height="15.0" fill="rgb(216,74,74)" rx="2" ry="2" />
+<text  x="1462.31" y="527.5" >_..</text>
+</g>
+<g >
+<title>TH1::Fill (588,378,453 samples, 0.44%)</title><rect x="1423.8" y="677" width="6.5" height="15.0" fill="rgb(204,204,60)" rx="2" ry="2" />
+<text  x="1426.84" y="687.5" ></text>
+</g>
+<g >
+<title>clang::ASTDeclReader::Visit (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="197" width="0.5" height="15.0" fill="rgb(196,196,57)" rx="2" ry="2" />
+<text  x="1488.25" y="207.5" ></text>
+</g>
+<g >
+<title>do_set_pte (84,245,949 samples, 0.06%)</title><rect x="11.8" y="565" width="0.9" height="15.0" fill="rgb(213,69,69)" rx="2" ry="2" />
+<text  x="14.80" y="575.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::declare (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="565" width="0.5" height="15.0" fill="rgb(200,200,59)" rx="2" ry="2" />
+<text  x="1489.25" y="575.5" ></text>
+</g>
+<g >
+<title>TFileCacheRead::ReadBuffer (1,539,772,417 samples, 1.15%)</title><rect x="1393.8" y="533" width="17.0" height="15.0" fill="rgb(190,190,55)" rx="2" ry="2" />
+<text  x="1396.78" y="543.5" ></text>
+</g>
+<g >
+<title>__libc_start_call_main (133,623,506,332 samples, 99.63%)</title><rect x="12.7" y="773" width="1474.6" height="15.0" fill="rgb(207,61,61)" rx="2" ry="2" />
+<text  x="15.73" y="783.5" >__libc_start_call_main</text>
+</g>
+<g >
+<title>dlopen@GLIBC_2.2.5 (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="565" width="25.5" height="15.0" fill="rgb(237,104,104)" rx="2" ry="2" />
+<text  x="1462.31" y="575.5" >d..</text>
+</g>
+<g >
+<title>__mod_memcg_lruvec_state (45,313,364 samples, 0.03%)</title><rect x="1451.3" y="261" width="0.5" height="15.0" fill="rgb(213,69,69)" rx="2" ry="2" />
+<text  x="1454.32" y="271.5" ></text>
+</g>
+<g >
+<title>TObjArray::Delete (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="533" width="4.0" height="15.0" fill="rgb(177,177,50)" rx="2" ry="2" />
+<text  x="1454.32" y="543.5" ></text>
+</g>
+<g >
+<title>TChain::Add (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="709" width="25.5" height="15.0" fill="rgb(178,178,51)" rx="2" ry="2" />
+<text  x="1462.31" y="719.5" >T..</text>
+</g>
+<g >
+<title>TListOfDataMembers::Get (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="517" width="0.5" height="15.0" fill="rgb(209,209,62)" rx="2" ry="2" />
+<text  x="1488.75" y="527.5" ></text>
+</g>
+<g >
+<title>TStorage::ReAllocChar (90,606,979 samples, 0.07%)</title><rect x="508.7" y="437" width="1.0" height="15.0" fill="rgb(199,199,59)" rx="2" ry="2" />
+<text  x="511.74" y="447.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RAction&lt;ROOT::Internal::RDF::FillHelper&lt;TH1D&gt;, ROOT::Detail::RDF::RFilter&lt;rdataframe (126,104,306,661 samples, 94.02%)</title><rect x="26.7" y="677" width="1391.6" height="15.0" fill="rgb(217,217,65)" rx="2" ry="2" />
+<text  x="29.72" y="687.5" >ROOT::Internal::RDF::RAction&lt;ROOT::Internal::RDF::FillHelper&lt;TH1D&gt;, ROOT::Detail::RDF::RFilter&lt;rdataframe</text>
+</g>
+<g >
+<title>__atan2 (1,494,430,220 samples, 1.11%)</title><rect x="1081.9" y="597" width="16.5" height="15.0" fill="rgb(218,76,76)" rx="2" ry="2" />
+<text  x="1084.87" y="607.5" ></text>
+</g>
+<g >
+<title>TPluginHandler::LoadPlugin (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="613" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1488.25" y="623.5" ></text>
+</g>
+<g >
+<title>memcpy_erms (45,314,022 samples, 0.03%)</title><rect x="1334.2" y="469" width="0.5" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="1337.24" y="479.5" ></text>
+</g>
+<g >
+<title>HandleInterpreterException (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="565" width="0.5" height="15.0" fill="rgb(226,89,89)" rx="2" ry="2" />
+<text  x="1489.75" y="575.5" ></text>
+</g>
+<g >
+<title>TBuffer::~TBuffer (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="469" width="3.5" height="15.0" fill="rgb(220,220,66)" rx="2" ry="2" />
+<text  x="1454.32" y="479.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::ProxyReadTemplate&lt;&amp;ROOT::Detail::TBranchProxy::ReadNoParentNoBranchCountNoCollection&gt; (1,042,266,468 samples, 0.78%)</title><rect x="582.2" y="517" width="11.5" height="15.0" fill="rgb(187,187,54)" rx="2" ry="2" />
+<text  x="585.20" y="527.5" ></text>
+</g>
+<g >
+<title>clear_page_erms (45,295,728 samples, 0.03%)</title><rect x="537.7" y="277" width="0.5" height="15.0" fill="rgb(217,75,75)" rx="2" ry="2" />
+<text  x="540.72" y="287.5" ></text>
+</g>
+<g >
+<title>__cosh (271,649,353 samples, 0.20%)</title><rect x="1202.8" y="613" width="3.0" height="15.0" fill="rgb(213,69,69)" rx="2" ry="2" />
+<text  x="1205.80" y="623.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::GetAddress (1,359,412,579 samples, 1.01%)</title><rect x="578.7" y="533" width="15.0" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="581.70" y="543.5" ></text>
+</g>
+<g >
+<title>TTree::LoadTree (317,100,883 samples, 0.24%)</title><rect x="1455.3" y="661" width="3.5" height="15.0" fill="rgb(186,186,54)" rx="2" ry="2" />
+<text  x="1458.31" y="671.5" ></text>
+</g>
+<g >
+<title>cling::IncrementalParser::ParseInternal (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="517" width="0.5" height="15.0" fill="rgb(214,214,64)" rx="2" ry="2" />
+<text  x="1489.25" y="527.5" ></text>
+</g>
+<g >
+<title>do_mmap (61,804,087 samples, 0.05%)</title><rect x="10.0" y="597" width="0.7" height="15.0" fill="rgb(249,122,122)" rx="2" ry="2" />
+<text  x="13.00" y="607.5" ></text>
+</g>
+<g >
+<title>TBufferFile::~TBufferFile (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="485" width="3.5" height="15.0" fill="rgb(204,204,60)" rx="2" ry="2" />
+<text  x="1454.32" y="495.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::loadPendingDeclChain (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="245" width="0.5" height="15.0" fill="rgb(220,220,66)" rx="2" ry="2" />
+<text  x="1488.25" y="255.5" ></text>
+</g>
+<g >
+<title>inflate (6,566,121,696 samples, 4.90%)</title><rect x="1259.3" y="517" width="72.4" height="15.0" fill="rgb(239,107,107)" rx="2" ry="2" />
+<text  x="1262.29" y="527.5" >inflate</text>
+</g>
+<g >
+<title>TClingBaseClassInfo::Offset (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="485" width="0.5" height="15.0" fill="rgb(181,181,52)" rx="2" ry="2" />
+<text  x="1488.25" y="495.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::RunAndCheckFilters (45,307,394 samples, 0.03%)</title><rect x="12.7" y="709" width="0.5" height="15.0" fill="rgb(175,175,50)" rx="2" ry="2" />
+<text  x="15.73" y="719.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::CheckFilters@plt (45,332,765 samples, 0.03%)</title><rect x="26.2" y="677" width="0.5" height="15.0" fill="rgb(184,184,53)" rx="2" ry="2" />
+<text  x="29.22" y="687.5" ></text>
+</g>
+<g >
+<title>__cosh_finite@GLIBC_2.15 (362,387,053 samples, 0.27%)</title><rect x="653.7" y="533" width="4.0" height="15.0" fill="rgb(231,95,95)" rx="2" ry="2" />
+<text  x="656.73" y="543.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::GetExternalCXXBaseSpecifiers (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="357" width="0.5" height="15.0" fill="rgb(229,229,69)" rx="2" ry="2" />
+<text  x="1488.25" y="367.5" ></text>
+</g>
+<g >
+<title>cgroup_rstat_updated (45,313,364 samples, 0.03%)</title><rect x="1451.3" y="245" width="0.5" height="15.0" fill="rgb(254,129,129)" rx="2" ry="2" />
+<text  x="1454.32" y="255.5" ></text>
+</g>
+<g >
+<title>llvm::PMTopLevelManager::schedulePass (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="117" width="0.5" height="15.0" fill="rgb(189,189,55)" rx="2" ry="2" />
+<text  x="1489.75" y="127.5" ></text>
+</g>
+<g >
+<title>TFileCacheRead::ReadBufferExtNormal (1,494,475,685 samples, 1.11%)</title><rect x="1393.8" y="517" width="16.5" height="15.0" fill="rgb(211,211,63)" rx="2" ry="2" />
+<text  x="1396.78" y="527.5" ></text>
+</g>
+<g >
+<title>clang::ItaniumVTableContext::getVTableLayout (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="85" width="0.5" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="1489.25" y="95.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (90,415,325 samples, 0.07%)</title><rect x="90.2" y="533" width="1.0" height="15.0" fill="rgb(229,93,93)" rx="2" ry="2" />
+<text  x="93.19" y="543.5" ></text>
+</g>
+<g >
+<title>TCling::AutoLoad (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="613" width="0.5" height="15.0" fill="rgb(203,203,60)" rx="2" ry="2" />
+<text  x="1487.76" y="623.5" ></text>
+</g>
+<g >
+<title>__cosh_finite@GLIBC_2.15 (996,375,406 samples, 0.74%)</title><rect x="1113.9" y="597" width="10.9" height="15.0" fill="rgb(242,111,111)" rx="2" ry="2" />
+<text  x="1116.85" y="607.5" ></text>
+</g>
+<g >
+<title>__mem_cgroup_uncharge_list (45,319,110 samples, 0.03%)</title><rect x="1453.3" y="229" width="0.5" height="15.0" fill="rgb(205,57,57)" rx="2" ry="2" />
+<text  x="1456.31" y="239.5" ></text>
+</g>
+<g >
+<title>_dl_start_user (84,398,257 samples, 0.06%)</title><rect x="11.8" y="805" width="0.9" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="14.80" y="815.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RFilter&lt;rdataframe (316,683,182 samples, 0.24%)</title><rect x="21.7" y="677" width="3.5" height="15.0" fill="rgb(214,214,64)" rx="2" ry="2" />
+<text  x="24.73" y="687.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenModule::EmitGlobalDefinition (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="421" width="0.5" height="15.0" fill="rgb(195,195,57)" rx="2" ry="2" />
+<text  x="1489.25" y="431.5" ></text>
+</g>
+<g >
+<title>alloc_pages_vma (135,905,120 samples, 0.10%)</title><rect x="537.7" y="325" width="1.5" height="15.0" fill="rgb(208,62,62)" rx="2" ry="2" />
+<text  x="540.72" y="335.5" ></text>
+</g>
+<g >
+<title>__mod_lruvec_page_state (45,271,837 samples, 0.03%)</title><rect x="521.2" y="325" width="0.5" height="15.0" fill="rgb(219,77,77)" rx="2" ry="2" />
+<text  x="524.23" y="335.5" ></text>
+</g>
+<g >
+<title>clang::ASTContext::getASTRecordLayout (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="469" width="0.5" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1488.25" y="479.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::GetAddress (181,265,991 samples, 0.14%)</title><rect x="1348.7" y="613" width="2.0" height="15.0" fill="rgb(199,199,58)" rx="2" ry="2" />
+<text  x="1351.73" y="623.5" ></text>
+</g>
+<g >
+<title>_dl_sysdep_start (61,804,087 samples, 0.05%)</title><rect x="10.0" y="773" width="0.7" height="15.0" fill="rgb(208,62,62)" rx="2" ry="2" />
+<text  x="13.00" y="783.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (45,325,267 samples, 0.03%)</title><rect x="524.7" y="421" width="0.5" height="15.0" fill="rgb(240,108,108)" rx="2" ry="2" />
+<text  x="527.73" y="431.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadArray (317,168,188 samples, 0.24%)</title><rect x="521.7" y="453" width="3.5" height="15.0" fill="rgb(220,220,66)" rx="2" ry="2" />
+<text  x="524.73" y="463.5" ></text>
+</g>
+<g >
+<title>folio_add_lru (45,225,288 samples, 0.03%)</title><rect x="541.7" y="341" width="0.5" height="15.0" fill="rgb(250,123,123)" rx="2" ry="2" />
+<text  x="544.72" y="351.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::TTreeReaderValueBase::ProxyReadTemplate&lt;&amp;ROOT::Detail::TBranchProxy::ReadNoParentNoBranchCountNoCollection&gt; (90,611,973 samples, 0.07%)</title><rect x="1349.7" y="597" width="1.0" height="15.0" fill="rgb(223,223,67)" rx="2" ry="2" />
+<text  x="1352.73" y="607.5" ></text>
+</g>
+<g >
+<title>TROOT::InitInterpreter (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="581" width="25.5" height="15.0" fill="rgb(209,209,62)" rx="2" ry="2" />
+<text  x="1462.31" y="591.5" >T..</text>
+</g>
+<g >
+<title>run_one_command.isra.0 (156,289,145 samples, 0.12%)</title><rect x="1488.3" y="741" width="1.7" height="15.0" fill="rgb(254,129,129)" rx="2" ry="2" />
+<text  x="1491.28" y="751.5" ></text>
+</g>
+<g >
+<title>TPluginHandler::ExecPluginImpl&lt;&gt; (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="693" width="0.5" height="15.0" fill="rgb(209,209,62)" rx="2" ry="2" />
+<text  x="1489.25" y="703.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitAnyExpr (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="197" width="0.5" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="1489.25" y="207.5" ></text>
+</g>
+<g >
+<title>TUrl::GetSpecialProtocols (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="645" width="25.5" height="15.0" fill="rgb(181,181,52)" rx="2" ry="2" />
+<text  x="1462.31" y="655.5" >T..</text>
+</g>
+<g >
+<title>openaux (84,398,257 samples, 0.06%)</title><rect x="11.8" y="709" width="0.9" height="15.0" fill="rgb(223,83,83)" rx="2" ry="2" />
+<text  x="14.80" y="719.5" ></text>
+</g>
+<g >
+<title>_int_malloc (90,606,979 samples, 0.07%)</title><rect x="508.7" y="389" width="1.0" height="15.0" fill="rgb(241,110,110)" rx="2" ry="2" />
+<text  x="511.74" y="399.5" ></text>
+</g>
+<g >
+<title>__expm1 (2,355,616,851 samples, 1.76%)</title><rect x="1162.8" y="581" width="26.0" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="1165.82" y="591.5" >_..</text>
+</g>
+<g >
+<title>sincos@plt (45,320,253 samples, 0.03%)</title><rect x="829.7" y="549" width="0.5" height="15.0" fill="rgb(211,67,67)" rx="2" ry="2" />
+<text  x="832.66" y="559.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (90,547,925 samples, 0.07%)</title><rect x="541.2" y="405" width="1.0" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="544.22" y="415.5" ></text>
+</g>
+<g >
+<title>TEnv::GetValue (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="629" width="25.5" height="15.0" fill="rgb(187,187,54)" rx="2" ry="2" />
+<text  x="1462.31" y="639.5" >T..</text>
+</g>
+<g >
+<title>clang::ASTDeclReader::VisitRedeclarableTemplateDecl (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="165" width="0.5" height="15.0" fill="rgb(216,216,64)" rx="2" ry="2" />
+<text  x="1488.25" y="175.5" ></text>
+</g>
+<g >
+<title>clang::ASTContext::getASTRecordLayout (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="405" width="0.5" height="15.0" fill="rgb(202,202,59)" rx="2" ry="2" />
+<text  x="1488.25" y="415.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;float  (106,532,451,774 samples, 79.43%)</title><rect x="49.7" y="645" width="1175.6" height="15.0" fill="rgb(192,192,56)" rx="2" ry="2" />
+<text  x="52.71" y="655.5" >ROOT::Detail::RDF::RDefine&lt;float </text>
+</g>
+<g >
+<title>_dl_catch_exception (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="469" width="25.5" height="15.0" fill="rgb(242,112,112)" rx="2" ry="2" />
+<text  x="1462.31" y="479.5" >_..</text>
+</g>
+<g >
+<title>do_user_addr_fault (45,283,405 samples, 0.03%)</title><rect x="1336.7" y="453" width="0.5" height="15.0" fill="rgb(225,87,87)" rx="2" ry="2" />
+<text  x="1339.74" y="463.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="453" width="15.5" height="15.0" fill="rgb(206,59,59)" rx="2" ry="2" />
+<text  x="1396.78" y="463.5" ></text>
+</g>
+<g >
+<title>_dl_map_object_deps (84,398,257 samples, 0.06%)</title><rect x="11.8" y="741" width="0.9" height="15.0" fill="rgb(215,71,71)" rx="2" ry="2" />
+<text  x="14.80" y="751.5" ></text>
+</g>
+<g >
+<title>clang::Decl::castToDeclContext (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="117" width="0.5" height="15.0" fill="rgb(217,217,65)" rx="2" ry="2" />
+<text  x="1488.25" y="127.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;llvm::Expected&lt;unsigned long&gt;  (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="405" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1489.75" y="415.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::ReadDeclRecord (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="213" width="0.5" height="15.0" fill="rgb(178,178,51)" rx="2" ry="2" />
+<text  x="1488.25" y="223.5" ></text>
+</g>
+<g >
+<title>charge_memcg (45,306,459 samples, 0.03%)</title><rect x="509.2" y="277" width="0.5" height="15.0" fill="rgb(236,103,103)" rx="2" ry="2" />
+<text  x="512.24" y="287.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::VecOps::RVecImpl&lt;float&gt;::swap (181,265,587 samples, 0.14%)</title><rect x="1346.7" y="613" width="2.0" height="15.0" fill="rgb(216,216,65)" rx="2" ry="2" />
+<text  x="1349.73" y="623.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::EvaluateInternal (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="485" width="0.5" height="15.0" fill="rgb(183,183,53)" rx="2" ry="2" />
+<text  x="1489.75" y="495.5" ></text>
+</g>
+<g >
+<title>THistPainter::PaintStat (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="645" width="0.5" height="15.0" fill="rgb(190,190,55)" rx="2" ry="2" />
+<text  x="1488.75" y="655.5" ></text>
+</g>
+<g >
+<title>__do_sys_brk (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="309" width="0.5" height="15.0" fill="rgb(208,62,62)" rx="2" ry="2" />
+<text  x="1457.81" y="319.5" ></text>
+</g>
+<g >
+<title>TBranch::GetBasketAndFirst (36,033,985,377 samples, 26.87%)</title><rect x="144.6" y="501" width="397.6" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="147.59" y="511.5" >TBranch::GetBasketAndFirst</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="453" width="3.5" height="15.0" fill="rgb(253,127,127)" rx="2" ry="2" />
+<text  x="1454.32" y="463.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::DeclareCFunction (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="581" width="0.5" height="15.0" fill="rgb(224,224,67)" rx="2" ry="2" />
+<text  x="1489.25" y="591.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (90,490,424 samples, 0.07%)</title><rect x="1333.2" y="453" width="1.0" height="15.0" fill="rgb(229,93,93)" rx="2" ry="2" />
+<text  x="1336.25" y="463.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;llvm::Expected&lt;unsigned long&gt;  (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="229" width="0.5" height="15.0" fill="rgb(202,202,60)" rx="2" ry="2" />
+<text  x="1489.75" y="239.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (90,606,979 samples, 0.07%)</title><rect x="508.7" y="373" width="1.0" height="15.0" fill="rgb(222,82,82)" rx="2" ry="2" />
+<text  x="511.74" y="383.5" ></text>
+</g>
+<g >
+<title>__mem_cgroup_charge (45,299,009 samples, 0.03%)</title><rect x="540.2" y="341" width="0.5" height="15.0" fill="rgb(238,105,105)" rx="2" ry="2" />
+<text  x="543.22" y="351.5" ></text>
+</g>
+<g >
+<title>TBasket::ReadBasketBuffers (7,109,585,041 samples, 5.30%)</title><rect x="1258.8" y="549" width="78.4" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="1261.79" y="559.5" >TBasket::..</text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RDefineReader::GetImpl (88,406,845,687 samples, 65.92%)</title><rect x="55.7" y="629" width="975.6" height="15.0" fill="rgb(188,188,54)" rx="2" ry="2" />
+<text  x="58.71" y="639.5" >ROOT::Internal::RDF::RDefineReader::GetImpl</text>
+</g>
+<g >
+<title>cling::IncrementalJIT::getSymbolAddress (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="437" width="0.5" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1489.75" y="447.5" ></text>
+</g>
+<g >
+<title>dlopen_doit (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="421" width="0.5" height="15.0" fill="rgb(220,79,79)" rx="2" ry="2" />
+<text  x="1487.76" y="431.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (84,245,949 samples, 0.06%)</title><rect x="11.8" y="661" width="0.9" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="14.80" y="671.5" ></text>
+</g>
+<g >
+<title>ROOT::RDataFrame::RDataFrame (2,305,872,698 samples, 1.72%)</title><rect x="1459.3" y="725" width="25.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1462.31" y="735.5" >R..</text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;float  (135,988,726 samples, 0.10%)</title><rect x="45.7" y="661" width="1.5" height="15.0" fill="rgb(190,190,55)" rx="2" ry="2" />
+<text  x="48.71" y="671.5" ></text>
+</g>
+<g >
+<title>__sinh_finite@GLIBC_2.15 (1,992,125,427 samples, 1.49%)</title><rect x="798.2" y="517" width="22.0" height="15.0" fill="rgb(230,94,94)" rx="2" ry="2" />
+<text  x="801.18" y="527.5" >_..</text>
+</g>
+<g >
+<title>_dl_sysdep_start (84,398,257 samples, 0.06%)</title><rect x="11.8" y="773" width="0.9" height="15.0" fill="rgb(237,105,105)" rx="2" ry="2" />
+<text  x="14.80" y="783.5" ></text>
+</g>
+<g >
+<title>_raw_spin_lock (45,283,405 samples, 0.03%)</title><rect x="1336.7" y="405" width="0.5" height="15.0" fill="rgb(233,99,99)" rx="2" ry="2" />
+<text  x="1339.74" y="415.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::readTypeRecord (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="293" width="0.5" height="15.0" fill="rgb(227,227,69)" rx="2" ry="2" />
+<text  x="1488.25" y="303.5" ></text>
+</g>
+<g >
+<title>TDataMember::Init (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="485" width="0.5" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="1488.75" y="495.5" ></text>
+</g>
+<g >
+<title>folio_memcg_lock.part.0 (45,284,096 samples, 0.03%)</title><rect x="1452.3" y="245" width="0.5" height="15.0" fill="rgb(251,124,124)" rx="2" ry="2" />
+<text  x="1455.32" y="255.5" ></text>
+</g>
+<g >
+<title>clang::ASTDeclReader::VisitTemplateDecl (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="149" width="0.5" height="15.0" fill="rgb(176,176,50)" rx="2" ry="2" />
+<text  x="1488.25" y="159.5" ></text>
+</g>
+<g >
+<title>TFile::Close (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="629" width="4.0" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1454.32" y="639.5" ></text>
+</g>
+<g >
+<title>TBuffer::Expand (271,698,600 samples, 0.20%)</title><rect x="1331.7" y="533" width="3.0" height="15.0" fill="rgb(212,212,63)" rx="2" ry="2" />
+<text  x="1334.75" y="543.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (90,547,925 samples, 0.07%)</title><rect x="541.2" y="389" width="1.0" height="15.0" fill="rgb(201,51,51)" rx="2" ry="2" />
+<text  x="544.22" y="399.5" ></text>
+</g>
+<g >
+<title>TImageDump::Open (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="693" width="0.5" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1487.76" y="703.5" ></text>
+</g>
+<g >
+<title>cling::MetaParser::isCommand (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="533" width="0.5" height="15.0" fill="rgb(206,206,61)" rx="2" ry="2" />
+<text  x="1489.75" y="543.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::RunTreeReader (131,045,980,718 samples, 97.71%)</title><rect x="13.2" y="709" width="1446.1" height="15.0" fill="rgb(204,204,60)" rx="2" ry="2" />
+<text  x="16.23" y="719.5" >ROOT::Detail::RDF::RLoopManager::RunTreeReader</text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitCXXConstructorCall (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="117" width="0.5" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="1489.25" y="127.5" ></text>
+</g>
+<g >
+<title>__sincos_fma (135,952,945 samples, 0.10%)</title><rect x="1220.3" y="613" width="1.5" height="15.0" fill="rgb(246,118,118)" rx="2" ry="2" />
+<text  x="1223.29" y="623.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (45,299,009 samples, 0.03%)</title><rect x="540.2" y="357" width="0.5" height="15.0" fill="rgb(208,62,62)" rx="2" ry="2" />
+<text  x="543.22" y="367.5" ></text>
+</g>
+<g >
+<title>TTree::LoadTree (45,332,649 samples, 0.03%)</title><rect x="1458.8" y="677" width="0.5" height="15.0" fill="rgb(209,209,62)" rx="2" ry="2" />
+<text  x="1461.81" y="687.5" ></text>
+</g>
+<g >
+<title>direct_find_trijet (17,364,784,521 samples, 12.95%)</title><rect x="839.2" y="581" width="191.6" height="15.0" fill="rgb(238,106,106)" rx="2" ry="2" />
+<text  x="842.15" y="591.5" >direct_find_trijet</text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitSimpleStmt (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="309" width="0.5" height="15.0" fill="rgb(192,192,56)" rx="2" ry="2" />
+<text  x="1489.25" y="319.5" ></text>
+</g>
+<g >
+<title>TBranch::GetBasketImpl (2,672,116,223 samples, 1.99%)</title><rect x="1381.3" y="581" width="29.5" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="1384.29" y="591.5" >TB..</text>
+</g>
+<g >
+<title>do_user_addr_fault (45,299,009 samples, 0.03%)</title><rect x="540.2" y="389" width="0.5" height="15.0" fill="rgb(211,66,66)" rx="2" ry="2" />
+<text  x="543.22" y="399.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitCompoundStmt (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="293" width="0.5" height="15.0" fill="rgb(180,180,52)" rx="2" ry="2" />
+<text  x="1489.25" y="303.5" ></text>
+</g>
+<g >
+<title>cling::IncrementalParser::Compile (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="533" width="0.5" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="1489.25" y="543.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenModule::EmitTopLevelDecl (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="453" width="0.5" height="15.0" fill="rgb(207,207,61)" rx="2" ry="2" />
+<text  x="1489.25" y="463.5" ></text>
+</g>
+<g >
+<title>sync_regs (45,314,022 samples, 0.03%)</title><rect x="1334.2" y="485" width="0.5" height="15.0" fill="rgb(254,129,129)" rx="2" ry="2" />
+<text  x="1337.24" y="495.5" ></text>
+</g>
+<g >
+<title>TH1D::AddBinContent (316,918,578 samples, 0.24%)</title><rect x="1430.3" y="677" width="3.5" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="1433.33" y="687.5" ></text>
+</g>
+<g >
+<title>[unknown] (94,008,755 samples, 0.07%)</title><rect x="10.8" y="805" width="1.0" height="15.0" fill="rgb(221,81,81)" rx="2" ry="2" />
+<text  x="13.76" y="815.5" ></text>
+</g>
+<g >
+<title>llvm::TargetPassConfig::addCoreISelPasses (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="149" width="0.5" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1489.75" y="159.5" ></text>
+</g>
+<g >
+<title>release_pages (45,313,364 samples, 0.03%)</title><rect x="1451.3" y="277" width="0.5" height="15.0" fill="rgb(217,75,75)" rx="2" ry="2" />
+<text  x="1454.32" y="287.5" ></text>
+</g>
+<g >
+<title>TClass::Property (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="533" width="0.5" height="15.0" fill="rgb(189,189,55)" rx="2" ry="2" />
+<text  x="1488.25" y="543.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitCXXNewExpr (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="165" width="0.5" height="15.0" fill="rgb(186,186,54)" rx="2" ry="2" />
+<text  x="1489.25" y="175.5" ></text>
+</g>
+<g >
+<title>addPassesToGenerateCode (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="165" width="0.5" height="15.0" fill="rgb(234,99,99)" rx="2" ry="2" />
+<text  x="1489.75" y="175.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (181,099,960 samples, 0.14%)</title><rect x="537.2" y="357" width="2.0" height="15.0" fill="rgb(229,92,92)" rx="2" ry="2" />
+<text  x="540.22" y="367.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadFastArray (905,660,109 samples, 0.68%)</title><rect x="557.7" y="517" width="10.0" height="15.0" fill="rgb(188,188,55)" rx="2" ry="2" />
+<text  x="560.71" y="527.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenModule::EmitGlobal (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="437" width="0.5" height="15.0" fill="rgb(188,188,54)" rx="2" ry="2" />
+<text  x="1489.25" y="447.5" ></text>
+</g>
+<g >
+<title>cling::MetaSema::actOnxCommand (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="501" width="0.5" height="15.0" fill="rgb(180,180,51)" rx="2" ry="2" />
+<text  x="1489.75" y="511.5" ></text>
+</g>
+<g >
+<title>vfs_read (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="405" width="15.5" height="15.0" fill="rgb(219,78,78)" rx="2" ry="2" />
+<text  x="1396.78" y="415.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::VecOps::RVecImpl&lt;unsigned long&gt;::operator= (226,557,806 samples, 0.17%)</title><rect x="61.2" y="597" width="2.5" height="15.0" fill="rgb(204,204,60)" rx="2" ry="2" />
+<text  x="64.21" y="607.5" ></text>
+</g>
+<g >
+<title>TROOT::Macro (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="645" width="0.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1489.75" y="655.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (45,306,459 samples, 0.03%)</title><rect x="509.2" y="325" width="0.5" height="15.0" fill="rgb(227,90,90)" rx="2" ry="2" />
+<text  x="512.24" y="335.5" ></text>
+</g>
+<g >
+<title>llvm::RuntimeDyldImpl::resolveExternalSymbols (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="293" width="0.5" height="15.0" fill="rgb(199,199,59)" rx="2" ry="2" />
+<text  x="1489.75" y="303.5" ></text>
+</g>
+<g >
+<title>clear_page_erms (135,912,069 samples, 0.10%)</title><rect x="518.2" y="293" width="1.5" height="15.0" fill="rgb(226,87,87)" rx="2" ry="2" />
+<text  x="521.23" y="303.5" ></text>
+</g>
+<g >
+<title>filemap_get_pages (135,841,620 samples, 0.10%)</title><rect x="1407.8" y="357" width="1.5" height="15.0" fill="rgb(235,102,102)" rx="2" ry="2" />
+<text  x="1410.77" y="367.5" ></text>
+</g>
+<g >
+<title>dl_open_worker_begin (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="341" width="0.5" height="15.0" fill="rgb(202,53,53)" rx="2" ry="2" />
+<text  x="1487.76" y="351.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (45,306,459 samples, 0.03%)</title><rect x="509.2" y="341" width="0.5" height="15.0" fill="rgb(209,63,63)" rx="2" ry="2" />
+<text  x="512.24" y="351.5" ></text>
+</g>
+<g >
+<title>TBasket::~TBasket (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="453" width="0.5" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="1457.81" y="463.5" ></text>
+</g>
+<g >
+<title>TBuffer::Expand (135,966,851 samples, 0.10%)</title><rect x="539.2" y="453" width="1.5" height="15.0" fill="rgb(187,187,54)" rx="2" ry="2" />
+<text  x="542.22" y="463.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (45,325,267 samples, 0.03%)</title><rect x="524.7" y="373" width="0.5" height="15.0" fill="rgb(219,78,78)" rx="2" ry="2" />
+<text  x="527.73" y="383.5" ></text>
+</g>
+<g >
+<title>TLeafF::ReadBasket (180,542,164 samples, 0.13%)</title><rect x="1337.2" y="581" width="2.0" height="15.0" fill="rgb(219,219,66)" rx="2" ry="2" />
+<text  x="1340.24" y="591.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RDefineReader::GetImpl (226,590,847 samples, 0.17%)</title><rect x="1234.8" y="629" width="2.5" height="15.0" fill="rgb(196,196,57)" rx="2" ry="2" />
+<text  x="1237.79" y="639.5" ></text>
+</g>
+<g >
+<title>TFile::ReadBuffer (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="485" width="15.5" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1396.78" y="495.5" ></text>
+</g>
+<g >
+<title>unmap_page_range (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="245" width="0.5" height="15.0" fill="rgb(239,107,107)" rx="2" ry="2" />
+<text  x="1457.81" y="255.5" ></text>
+</g>
+<g >
+<title>_dl_relocate_object (2,305,857,233 samples, 1.72%)</title><rect x="1459.3" y="405" width="25.5" height="15.0" fill="rgb(252,125,125)" rx="2" ry="2" />
+<text  x="1462.31" y="415.5" >_..</text>
+</g>
+<g >
+<title>__sinh (3,804,707,719 samples, 2.84%)</title><rect x="1158.3" y="597" width="42.0" height="15.0" fill="rgb(246,116,116)" rx="2" ry="2" />
+<text  x="1161.32" y="607.5" >__s..</text>
+</g>
+<g >
+<title>__ieee754_exp_fma (815,290,957 samples, 0.61%)</title><rect x="1104.9" y="581" width="9.0" height="15.0" fill="rgb(203,54,54)" rx="2" ry="2" />
+<text  x="1107.85" y="591.5" ></text>
+</g>
+<g >
+<title>TPad::SaveAs (226,345,522 samples, 0.17%)</title><rect x="1484.8" y="725" width="2.5" height="15.0" fill="rgb(195,195,57)" rx="2" ry="2" />
+<text  x="1487.76" y="735.5" ></text>
+</g>
+<g >
+<title>__ieee754_atan2_fma (90,644,644 samples, 0.07%)</title><rect x="1124.8" y="597" width="1.0" height="15.0" fill="rgb(234,100,100)" rx="2" ry="2" />
+<text  x="1127.85" y="607.5" ></text>
+</g>
+<g >
+<title>TBranch::GetBasketAndFirst (3,079,833,373 samples, 2.30%)</title><rect x="1376.8" y="597" width="34.0" height="15.0" fill="rgb(177,177,50)" rx="2" ry="2" />
+<text  x="1379.79" y="607.5" >TB..</text>
+</g>
+<g >
+<title>adler32_z (90,646,851 samples, 0.07%)</title><rect x="1381.3" y="517" width="1.0" height="15.0" fill="rgb(226,88,88)" rx="2" ry="2" />
+<text  x="1384.29" y="527.5" ></text>
+</g>
+<g >
+<title>TBranch::GetBasketAndFirst (271,939,602 samples, 0.20%)</title><rect x="126.6" y="517" width="3.0" height="15.0" fill="rgb(222,222,67)" rx="2" ry="2" />
+<text  x="129.60" y="527.5" ></text>
+</g>
+<g >
+<title>_int_free (90,592,792 samples, 0.07%)</title><rect x="828.7" y="533" width="1.0" height="15.0" fill="rgb(236,102,102)" rx="2" ry="2" />
+<text  x="831.66" y="543.5" ></text>
+</g>
+<g >
+<title>TBasket::ReadBasketBuffers (2,672,116,223 samples, 1.99%)</title><rect x="1381.3" y="565" width="29.5" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="1384.29" y="575.5" >TB..</text>
+</g>
+<g >
+<title>__libc_start_call_main (156,289,145 samples, 0.12%)</title><rect x="1488.3" y="773" width="1.7" height="15.0" fill="rgb(237,104,104)" rx="2" ry="2" />
+<text  x="1491.28" y="783.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (498,310,956 samples, 0.37%)</title><rect x="516.2" y="373" width="5.5" height="15.0" fill="rgb(253,128,128)" rx="2" ry="2" />
+<text  x="519.23" y="383.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;std::function&lt;ROOT::VecOps::RVec&lt;unsigned long&gt;  (135,899,953 samples, 0.10%)</title><rect x="54.2" y="629" width="1.5" height="15.0" fill="rgb(199,199,59)" rx="2" ry="2" />
+<text  x="57.21" y="639.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::CheckFilters (90,455,698 samples, 0.07%)</title><rect x="25.2" y="677" width="1.0" height="15.0" fill="rgb(225,225,68)" rx="2" ry="2" />
+<text  x="28.22" y="687.5" ></text>
+</g>
+<g >
+<title>THashList::Delete (361,772,178 samples, 0.27%)</title><rect x="1451.3" y="597" width="4.0" height="15.0" fill="rgb(229,229,69)" rx="2" ry="2" />
+<text  x="1454.32" y="607.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="389" width="0.5" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="1487.76" y="399.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (135,923,649 samples, 0.10%)</title><rect x="828.2" y="549" width="1.5" height="15.0" fill="rgb(249,122,122)" rx="2" ry="2" />
+<text  x="831.16" y="559.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::VecOps::RVecImpl&lt;float&gt;::swap (45,312,007 samples, 0.03%)</title><rect x="91.2" y="549" width="0.5" height="15.0" fill="rgb(192,192,56)" rx="2" ry="2" />
+<text  x="94.18" y="559.5" ></text>
+</g>
+<g >
+<title>clang::CodeGen::CodeGenFunction::EmitIfStmt (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="341" width="0.5" height="15.0" fill="rgb(212,212,63)" rx="2" ry="2" />
+<text  x="1489.25" y="351.5" ></text>
+</g>
+<g >
+<title>TClingCallFunc::compile_wrapper (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="613" width="0.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1489.25" y="623.5" ></text>
+</g>
+<g >
+<title>ROOT::TGenericClassInfo::GetClass (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="613" width="0.5" height="15.0" fill="rgb(205,205,61)" rx="2" ry="2" />
+<text  x="1488.75" y="623.5" ></text>
+</g>
+<g >
+<title>TBasket::~TBasket (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="469" width="0.5" height="15.0" fill="rgb(216,216,64)" rx="2" ry="2" />
+<text  x="1457.81" y="479.5" ></text>
+</g>
+<g >
+<title>unmap_page_range (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="677" width="1.0" height="15.0" fill="rgb(239,107,107)" rx="2" ry="2" />
+<text  x="1490.28" y="687.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::VecOps::RVecImpl&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PxPyPzE4D&lt;double&gt; &gt; &gt;::operator= (588,389,030 samples, 0.44%)</title><rect x="84.7" y="549" width="6.5" height="15.0" fill="rgb(189,189,55)" rx="2" ry="2" />
+<text  x="87.69" y="559.5" ></text>
+</g>
+<g >
+<title>__brk (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="357" width="0.5" height="15.0" fill="rgb(211,66,66)" rx="2" ry="2" />
+<text  x="1457.81" y="367.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (1,403,858,445 samples, 1.05%)</title><rect x="1393.8" y="437" width="15.5" height="15.0" fill="rgb(238,106,106)" rx="2" ry="2" />
+<text  x="1396.78" y="447.5" ></text>
+</g>
+<g >
+<title>__sinh_finite@GLIBC_2.15 (1,041,640,923 samples, 0.78%)</title><rect x="1188.8" y="581" width="11.5" height="15.0" fill="rgb(253,127,127)" rx="2" ry="2" />
+<text  x="1191.81" y="591.5" ></text>
+</g>
+<g >
+<title>dl_main (61,804,087 samples, 0.05%)</title><rect x="10.0" y="757" width="0.7" height="15.0" fill="rgb(238,106,106)" rx="2" ry="2" />
+<text  x="13.00" y="767.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (90,490,424 samples, 0.07%)</title><rect x="1333.2" y="469" width="1.0" height="15.0" fill="rgb(240,108,108)" rx="2" ry="2" />
+<text  x="1336.25" y="479.5" ></text>
+</g>
+<g >
+<title>TProfile::Class (45,208,408 samples, 0.03%)</title><rect x="1485.8" y="629" width="0.5" height="15.0" fill="rgb(219,219,66)" rx="2" ry="2" />
+<text  x="1488.75" y="639.5" ></text>
+</g>
+<g >
+<title>[libpng16.so.16.39.0] (45,227,346 samples, 0.03%)</title><rect x="10.8" y="789" width="0.5" height="15.0" fill="rgb(210,64,64)" rx="2" ry="2" />
+<text  x="13.76" y="799.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::GetTypeSourceInfo (45,245,660 samples, 0.03%)</title><rect x="1485.3" y="325" width="0.5" height="15.0" fill="rgb(206,206,61)" rx="2" ry="2" />
+<text  x="1488.25" y="335.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (181,099,960 samples, 0.14%)</title><rect x="537.2" y="373" width="2.0" height="15.0" fill="rgb(221,81,81)" rx="2" ry="2" />
+<text  x="540.22" y="383.5" ></text>
+</g>
+<g >
+<title>llvm::orc::LegacyRTDyldObjectLinkingLayer::ConcreteLinkedObject&lt;std::shared_ptr&lt;llvm::RuntimeDyld::MemoryManager&gt; &gt;::finalize (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="341" width="0.5" height="15.0" fill="rgb(192,192,56)" rx="2" ry="2" />
+<text  x="1489.75" y="351.5" ></text>
+</g>
+<g >
+<title>TLeafF::ReadBasket (860,559,619 samples, 0.64%)</title><rect x="542.2" y="501" width="9.5" height="15.0" fill="rgb(213,213,64)" rx="2" ry="2" />
+<text  x="545.22" y="511.5" ></text>
+</g>
+<g >
+<title>trijet_pt (17,174,383,465 samples, 12.81%)</title><rect x="1035.8" y="629" width="189.5" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="1038.77" y="639.5" >trijet_pt</text>
+</g>
+<g >
+<title>_dl_catch_error (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="453" width="0.5" height="15.0" fill="rgb(240,109,109)" rx="2" ry="2" />
+<text  x="1487.76" y="463.5" ></text>
+</g>
+<g >
+<title>llvm::LLVMTargetMachine::addPassesToEmitMC (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="181" width="0.5" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="1489.75" y="191.5" ></text>
+</g>
+<g >
+<title>dlopen@GLIBC_2.2.5 (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="485" width="0.5" height="15.0" fill="rgb(247,119,119)" rx="2" ry="2" />
+<text  x="1487.76" y="495.5" ></text>
+</g>
+<g >
+<title>copy_page_to_iter (1,222,701,684 samples, 0.91%)</title><rect x="1394.3" y="357" width="13.5" height="15.0" fill="rgb(250,123,123)" rx="2" ry="2" />
+<text  x="1397.28" y="367.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (90,350,918 samples, 0.07%)</title><rect x="1487.3" y="789" width="1.0" height="15.0" fill="rgb(237,104,104)" rx="2" ry="2" />
+<text  x="1490.28" y="799.5" ></text>
+</g>
+<g >
+<title>TStorage::ReAllocChar (45,333,633 samples, 0.03%)</title><rect x="539.2" y="437" width="0.5" height="15.0" fill="rgb(205,205,61)" rx="2" ry="2" />
+<text  x="542.22" y="447.5" ></text>
+</g>
+<g >
+<title>ROOT::VecOps::Construct&lt;ROOT::Math::LorentzVector&lt;ROOT::Math::PtEtaPhiM4D&lt;double&gt; &gt;, float, float, float, float&gt; (90,567,272 samples, 0.07%)</title><rect x="835.2" y="565" width="1.0" height="15.0" fill="rgb(180,180,52)" rx="2" ry="2" />
+<text  x="838.16" y="575.5" ></text>
+</g>
+<g >
+<title>TLeafI::GetMaximum (45,242,568 samples, 0.03%)</title><rect x="551.7" y="501" width="0.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="554.72" y="511.5" ></text>
+</g>
+<g >
+<title>TBranch::GetBasketAndFirst (7,290,754,754 samples, 5.44%)</title><rect x="1256.8" y="581" width="80.4" height="15.0" fill="rgb(226,226,68)" rx="2" ry="2" />
+<text  x="1259.79" y="591.5" >TBranch::..</text>
+</g>
+<g >
+<title>TBranch::GetBasketImpl (7,109,585,041 samples, 5.30%)</title><rect x="1258.8" y="565" width="78.4" height="15.0" fill="rgb(182,182,52)" rx="2" ry="2" />
+<text  x="1261.79" y="575.5" >TBranch::..</text>
+</g>
+<g >
+<title>__rcu_read_lock (45,327,632 samples, 0.03%)</title><rect x="517.2" y="309" width="0.5" height="15.0" fill="rgb(239,108,108)" rx="2" ry="2" />
+<text  x="520.23" y="319.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (90,490,424 samples, 0.07%)</title><rect x="1333.2" y="485" width="1.0" height="15.0" fill="rgb(240,108,108)" rx="2" ry="2" />
+<text  x="1336.25" y="495.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (44,988,143 samples, 0.03%)</title><rect x="1454.8" y="421" width="0.5" height="15.0" fill="rgb(214,71,71)" rx="2" ry="2" />
+<text  x="1457.81" y="431.5" ></text>
+</g>
+<g >
+<title>llvm::JITSymbol::getAddress (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="245" width="0.5" height="15.0" fill="rgb(195,195,57)" rx="2" ry="2" />
+<text  x="1489.75" y="255.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::RunFunction (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="469" width="0.5" height="15.0" fill="rgb(202,202,59)" rx="2" ry="2" />
+<text  x="1489.75" y="479.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (498,310,956 samples, 0.37%)</title><rect x="516.2" y="389" width="5.5" height="15.0" fill="rgb(231,95,95)" rx="2" ry="2" />
+<text  x="519.23" y="399.5" ></text>
+</g>
+<g >
+<title>TClass::LoadClass (45,278,892 samples, 0.03%)</title><rect x="1484.8" y="645" width="0.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="1487.76" y="655.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::pair&lt;clang::CXXMethodDecl const*, clang::OverridingMethods&gt;, std::allocator&lt;std::pair&lt;clang::CXXMethodDecl const*, clang::OverridingMethods&gt; &gt; &gt;::_M_realloc_insert&lt;std::pair&lt;clang::CXXMethodDecl const*, clang::OverridingMethods&gt; &gt; (45,278,161 samples, 0.03%)</title><rect x="1486.3" y="37" width="0.5" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="1489.25" y="47.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="357" width="3.5" height="15.0" fill="rgb(248,121,121)" rx="2" ry="2" />
+<text  x="1454.32" y="367.5" ></text>
+</g>
+<g >
+<title>inflate_fast (1,041,696,955 samples, 0.78%)</title><rect x="1382.3" y="517" width="11.5" height="15.0" fill="rgb(210,64,64)" rx="2" ry="2" />
+<text  x="1385.29" y="527.5" ></text>
+</g>
+<g >
+<title>TTreeCache::ReadBufferNormal (135,789,962 samples, 0.10%)</title><rect x="1335.7" y="533" width="1.5" height="15.0" fill="rgb(229,229,69)" rx="2" ry="2" />
+<text  x="1338.75" y="543.5" ></text>
+</g>
+<g >
+<title>llvm::orc::LazyEmittingLayer&lt;llvm::orc::LegacyIRCompileLayer&lt;cling::IncrementalJIT::RemovableObjectLinkingLayer, llvm::orc::SimpleCompiler&gt; &gt;::EmissionDeferredModule::find (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="389" width="0.5" height="15.0" fill="rgb(197,197,58)" rx="2" ry="2" />
+<text  x="1489.75" y="399.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;std::function&lt;ROOT::VecOps::RVec&lt;unsigned long&gt;  (135,848,874 samples, 0.10%)</title><rect x="1233.3" y="629" width="1.5" height="15.0" fill="rgb(226,226,68)" rx="2" ry="2" />
+<text  x="1236.29" y="639.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (45,283,405 samples, 0.03%)</title><rect x="1336.7" y="469" width="0.5" height="15.0" fill="rgb(226,88,88)" rx="2" ry="2" />
+<text  x="1339.74" y="479.5" ></text>
+</g>
+<g >
+<title>unmap_region (316,784,035 samples, 0.24%)</title><rect x="1451.3" y="309" width="3.5" height="15.0" fill="rgb(239,107,107)" rx="2" ry="2" />
+<text  x="1454.32" y="319.5" ></text>
+</g>
+<g >
+<title>TPad::Paint (90,454,068 samples, 0.07%)</title><rect x="1485.3" y="677" width="1.0" height="15.0" fill="rgb(179,179,51)" rx="2" ry="2" />
+<text  x="1488.25" y="687.5" ></text>
+</g>
+<g >
+<title>__cosh (1,449,011,670 samples, 1.08%)</title><rect x="637.7" y="533" width="16.0" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="640.74" y="543.5" ></text>
+</g>
+<g >
+<title>filemap_map_pages (84,245,949 samples, 0.06%)</title><rect x="11.8" y="581" width="0.9" height="15.0" fill="rgb(234,99,99)" rx="2" ry="2" />
+<text  x="14.80" y="591.5" ></text>
+</g>
+<g >
+<title>TCling::ExecuteMacro (45,334,401 samples, 0.03%)</title><rect x="1486.8" y="629" width="0.5" height="15.0" fill="rgb(191,191,56)" rx="2" ry="2" />
+<text  x="1489.75" y="639.5" ></text>
+</g>
+<g >
+<title>TTreeReader::SetEntryBase (2,037,567,646 samples, 1.52%)</title><rect x="1436.8" y="693" width="22.5" height="15.0" fill="rgb(229,229,69)" rx="2" ry="2" />
+<text  x="1439.83" y="703.5" >T..</text>
+</g>
+</g>
+</svg>
